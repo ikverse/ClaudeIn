@@ -89,7 +89,8 @@ It replaces the Kotlin analyst host in `signal-lab-egx/analyst-host/` and the ha
 - Both ports can be changed in the settings file, in case something else ever uses them.
 - **Who may connect at all.** ClaudeIn drops any connection that doesn't come from one of these:
   - this PC (loopback)
-  - a home network (10.x, 172.16–31.x, 192.168.x)
+  - a home network: 10.x, 172.16–31.x, 192.168.x, and the newer IPv6 home addresses (fe80::/10 and fc00::/7), which
+    phones often use, especially with a name like `my-pc.local`
   - Tailscale (100.64.0.0/10, fd7a:115c:a1e0::/48)
 
   This check comes on top of the code and TLS. The router opens nothing, so nothing on the internet can reach it.
@@ -136,6 +137,9 @@ the address gets `:8790` on the end, which means re-pairing once.
   "Forget" that device and pair it again. A code that is never used expires after 30 minutes.
 - **Per-device on/off and Forget.** Off refuses that device's runs until it is switched back on. Forget deletes its code
   for good, and its running runs stop at once.
+- **Allowed models per app** (owner, 2026-11-15). Each app has a list of models it may use. It is empty by default,
+  which means any model. The owner can set a list per app in Devices (4.6). A run asking for another model ends with
+  `failed: <app> isn't allowed to use <model>.`
 - **Wrong codes are slowed down.** Each wrong code adds a delay of up to 5 s, as today, and 20 wrong codes in a row from
   one address block that address for an hour.
 - **Programs on the PC don't pair.** ClaudeIn writes a random token to `%USERPROFILE%\.claudein\local.json` (token and
@@ -148,7 +152,10 @@ the address gets `:8790` on the end, which means re-pairing once.
 ### 4.4 Runner
 
 - Claude Code is run through the **Claude Agent SDK for Python**. That is the same library Village already uses
-  successfully with the Claude login on this PC, and it runs the same `claude` program the Kotlin host runs. It gives us:
+  successfully with the Claude login on this PC. The SDK comes with its **own copy of Claude Code** (`claude.exe`
+  inside the SDK), not the `claude` the owner types in a terminal. It uses the same Claude login. Its version can differ
+  from the owner's own, so the tray panel and the Home page show the version ClaudeIn uses. It updates when ClaudeIn's
+  add-ons are updated (running `Setup-ClaudeIn.bat` again). It gives us:
   - the **tool bridge in-process** (`create_sdk_mcp_server`): a tool call waits for the phone's or program's answer,
     with no separate HTTP bridge server to keep safe
   - streaming text (`include_partial_messages`)
@@ -167,6 +174,14 @@ the address gets `:8790` on the end, which means re-pairing once.
   - run in an empty temporary folder
 
   If an SDK option for one of the Kotlin flags (`--restricted`) is missing, it is passed as an extra command-line flag.
+- **No console windows.** ClaudeIn runs without a window (`pythonw`), and on Windows that can make a black console box
+  appear when Claude Code starts. Claude Code is started with Windows' "no window" setting (`CREATE_NO_WINDOW`) so
+  nothing flashes or stays on screen.
+- **Everything stops together.** Each Claude Code run is put inside a Windows "job" (a job object) set to end every
+  program in it when the run stops. So stopping a run, or ClaudeIn itself ending, never leaves Claude Code or anything
+  it started still running.
+- **One program, two halves.** The windows (PySide6) and the server and runner (asyncio) share one loop through the
+  small `qasync` add-on, so the windows stay smooth while Claude answers.
 - **The conversation history** is put in front of the prompt exactly as `ClaudeCode.kt` `input()` does it.
 - **Events and endings** are worked out the same way as `ClaudeRunner.execute`, so phones see exactly what they see today.
 - **Queue:** one queue with **N workers (2 by default; 1–4 in the tray)**. **Phone questions go first** (owner,
@@ -178,6 +193,11 @@ the address gets `:8790` on the end, which means re-pairing once.
     run, kill Claude Code and its child processes, and free the worker.
   - A run that hasn't started yet just leaves the queue.
   - A run that has lasted longer than 15 minutes (can be changed) is stopped.
+  - A run that has waited in line 10 minutes (can be changed) without starting leaves the queue and ends with
+    `failed: The PC was busy for too long. Try again.`
+- **PC sleep** (owner, 2026-11-15). While a run is going or waiting, ClaudeIn asks Windows to keep the PC awake. Then
+  the PC sleeps as normal. A sleeping PC means "PC not available" on the phone. A "Keep PC awake" switch in General (off
+  by default) keeps it awake all the time, for long trips away.
 - **Plan limit hit:** the run ends with `error_kind: rate_limited` and the reset time. The tray shows it. Waiting runs
   stay queued and are tried in turn.
 - **One copy only:** a second start of ClaudeIn sees the first one running, says so in a balloon, and exits.
@@ -235,13 +255,26 @@ Pair    Usage    Settings
 **Settings window**, frosted glass, with a side menu:
 - **Home:** status, plan use, runs working and waiting.
 - **Devices:** one card per pairing (Signal Lab — Phone, Signal Lab EGX — Phone, Village (this PC)), each with an
-  on/off switch and Forget…, plus "Pair a device".
+  on/off switch and Forget…, plus "Pair a device". Each app also has its list of allowed models (4.3).
 - **Usage:** the usage view from 4.5.
-- **General:** runs at once (1–4), Start with Windows, Open logs folder, New local token, and Check Claude Code (asks one
-  tiny Haiku question to confirm the login).
+- **General:** runs at once (1–4), Start with Windows, Keep PC awake (4.4), Open logs folder, New local token, Back up
+  pairings and Restore pairings (below), and Check Claude Code (asks one tiny Haiku question to confirm the login).
 - **Caps** are added here in phase 2.
 
 The pairing window (4.3) uses the same glass.
+
+**Glass check first.** Frosted glass sometimes lags when a window is dragged. So phase 1 starts with a small test
+window that the owner drags around. If it lags, the settings and pairing windows use the calmer Mica glass instead,
+and the small tray panel (which is never dragged) keeps the frosted glass.
+
+**Restart after a crash.** "Start with Windows" also sets up a Windows scheduled task, in the owner's own account with
+no admin rights, that starts ClaudeIn again within a minute if it has stopped without Quit. Quit leaves it stopped
+until the next sign-in.
+
+**Back up and restore pairings.** "Back up pairings" saves the certificate, its key and the pairing list (hashed codes
+only) as one file wherever the owner picks. "Restore pairings" puts them back, so a lost `.claudein` folder doesn't
+mean pairing every phone again. The file lets someone pretend to be ClaudeIn to the phones, so the window says to keep
+it somewhere private.
 
 - "Signed in ✓" comes from the last run that worked or from "Check Claude Code". ClaudeIn never sends a question on its
   own at start, so it uses no plan time just by running.
@@ -261,7 +294,9 @@ The pairing window (4.3) uses the same glass.
   wait, duration, ending and token counts. They never record codes, tokens, prompts, answers or tool data. A test checks
   this.
 - **Windows Firewall:** the first time ClaudeIn listens, Windows asks whether to allow it. The owner allows it on
-  **Private** networks only. Phase 4 covers the Tailscale network.
+  **Private** networks only. That first answer applies to Python in general, so phase 4 replaces it with a rule for
+  ClaudeIn's own `.venv` Python and only port 8790 (8791 is loopback and needs none). Phase 4 also covers the Tailscale
+  network.
 
 ### 4.8 Files and setup
 
@@ -270,7 +305,8 @@ ClaudeIn\
   CLAUDE.md, docs\plan.md, docs\protocol.md (phase 1)
   Setup-ClaudeIn.bat   makes .venv (Python 3.14 like Village), installs requirements, adds Start Menu and
                        Startup shortcuts that run .venv\Scripts\pythonw.exe -m claudein (no console window)
-  requirements.txt     claude-agent-sdk, aiohttp, cryptography, PySide6, PySide6-Fluent-Widgets, Pillow, qrcode
+  requirements.txt     claude-agent-sdk, aiohttp, cryptography, PySide6 (6.11 or later, the first that works with
+                       Python 3.14), PySide6-Fluent-Widgets, qasync, Pillow, qrcode
   claudein\            the service: config, tls, netguard, pairing, server, queue, runner, usage, tray, windows
   client\claudein_client\   the small Python client library (phase 3)
   tests\
@@ -282,7 +318,8 @@ ClaudeIn\
 ## 5. Phases (each approved on its own)
 
 ### Phase 1: the service (tray, pairing, queue, usage), compatible with today's phones
-Covers sections 4.1–4.4, the usage window from 4.5, the menu in 4.6 (without caps), 4.7 and 4.8, and `docs/protocol.md`.
+Covers sections 4.1–4.4, the usage window from 4.5, the tray panel, menu and settings window in 4.6 (without caps), 4.7
+and 4.8, and `docs/protocol.md`. It starts with the glass check (4.6), shown to the owner before the rest is built.
 
 **Done when:**
 - Both phone apps, re-paired to `<PC address>:8790`, ask questions and use their tools exactly as with the Kotlin host.
@@ -323,7 +360,8 @@ Covers the caps window, the cap check before each run, the cap message, and rese
   - the Tailscale app on each phone, signed in to the same Tailscale account
 - **ClaudeIn adds:**
   - It finds the PC's Tailscale address and name and shows them in "Pair a device…" and in the QR code.
-  - A one-time firewall rule that lets port 8790 in only from Tailscale (100.64.0.0/10) and the home network. Windows
+  - A one-time firewall rule for ClaudeIn's own `.venv` Python only, that lets port 8790 in only from Tailscale
+    (100.64.0.0/10) and the home network, and removes the broader "allow Python" answer from the first start. Windows
     asks the owner for permission once (UAC) and the owner clicks Yes.
   - A "Phone access" check in the tray.
 - **Plain advice:** pair the phone with the **Tailscale address**. It works at home and away, so the phone needs only
@@ -363,7 +401,11 @@ Covers the caps window, the cap check before each run, the cap message, and rese
   - Caps (phase 2).
   - Usage rows are written.
   - **Log files and usage.db contain no code, token, prompt or answer.**
-  - The address filter rejects a public IP.
+  - The address filter rejects a public IP and lets in IPv6 home addresses (fe80::, fc00::/7).
+  - A model not on an app's allowed list is refused; an empty list allows any.
+  - A run that waits in line too long ends with the "busy for too long" message.
+  - Stopping a run leaves no Claude Code or child program running (job object).
+  - Backup then restore brings back the same certificate and pairings.
   - The loopback token is refused on the network port.
   - Endings and `done` fields match the Kotlin host's for the same recorded stream.
 - **A live test, off by default:** one tiny Haiku question through the real Claude Code, run on purpose.
@@ -371,6 +413,9 @@ Covers the caps window, the cap check before each run, the cap message, and rese
 **By hand (the owner):**
 1. Run `Setup-ClaudeIn.bat` once. The ClaudeIn icon appears in the hidden icons.
 2. The icon is still there after a restart of the PC ("Start with Windows").
+   - Drag the glass test window around: it moves smoothly (phase 1, first step).
+   - While a question runs, no black console window appears.
+   - End ClaudeIn in Task Manager: it comes back within a minute. Quit it from the tray: it stays off.
 3. Pair the crypto app and the EGX app (Pair a device…, type address and code, compare the fingerprint).
 4. Ask a question in each app at home. Both show in Usage.
 5. Ask in both apps at the same time: both answer, or one says "Waiting for the PC…".
@@ -386,5 +431,9 @@ Covers the caps window, the cap check before each run, the cap message, and rese
 4. **A local git repository** is made now. A GitHub repository would be asked about separately.
 5. **Windows 11 Fluent look with Acrylic frosted glass** for the tray panel, menu and windows, built with PySide6 and
    PySide6-Fluent-Widgets instead of tkinter and pystray (see 4.6). Chosen from a mockup.
+6. **PC sleep:** ClaudeIn keeps the PC awake only while a run is going or waiting, with an optional "Keep PC awake"
+   switch, off by default (see 4.4).
+7. **Models:** each app may have a list of allowed models, empty (any model) by default (see 4.3).
 
-Decided here without asking (can be changed): port 8790/8791; `/hello` keeps the old name for now; 2 runs at once; 20 can wait; runs stop after 15 minutes; logs are kept 14 days.
+Decided here without asking (can be changed): port 8790/8791; `/hello` keeps the old name for now; 2 runs at once;
+10 minutes at most in line; 20 can wait; runs stop after 15 minutes; logs are kept 14 days.
