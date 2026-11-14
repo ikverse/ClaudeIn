@@ -206,30 +206,49 @@ the address gets `:8790` on the end, which means re-pairing once.
   - These are estimates, because Claude reports only the plan's total. The usage window says so.
   - When an app reaches its cap, its new runs end with the cap message until midnight. Runs already going finish.
 
-### 4.6 Tray menu
+### 4.6 Tray icon, panel and windows (owner, 2026-11-15)
 
+**Look.** Windows 11 Fluent style throughout:
+- **Acrylic frosted-glass** backgrounds that blur whatever is behind them, like the Start menu and quick settings
+- Fluent on/off switches, rounded cards, and Segoe Fluent Icons
+- follows Windows light/dark mode and the owner's accent colour
+- turns solid on its own when Windows turns the glass off: the window isn't in front, "Transparency effects" is off,
+  or battery saver is on
+
+**Tray icon.** It changes colour by state (normal, working, paused, problem: Claude Code missing or signed out, or a
+port in use) and stays readable on a light or dark taskbar. Hovering shows the status line.
+
+**Left-click: the ClaudeIn panel.** A frosted-glass panel above the clock, like Windows 11's quick-settings panel:
 ```
-ClaudeIn — running · 1 working, 0 waiting
-  Claude Code 2.x — signed in ✓ · plan: 5-hour 34%, week 12%
-  ──────────
-  Apps and devices ▸   Signal Lab — Phone      [on]  Forget…
-                       Signal Lab EGX — Phone  [on]  Forget…
-                       Village (this PC)       [on]
-  Pair a device…
-  Usage…
-  Runs at once ▸ 1 / 2 / 3 / 4
-  Pause all              (new runs refused, running ones finish)
-  Start with Windows ✓
-  Open logs folder
-  Check Claude Code      (asks one tiny Haiku question to confirm the login)
-  Quit
+[icon] ClaudeIn
+       Running · 1 working, 0 waiting
+[ Running / Paused ]  [ Start with Windows ]      (toggle tiles)
+Plan · 5-hour window  ▓▓▓░░░░░░  34% used · week 12%
+Claude Code 2.x — signed in ✓
+──────────
+Pair    Usage    Settings
 ```
-- The icon changes colour: normal, working, paused, and problem (Claude Code missing or signed out, or a port in use).
-  Hovering shows the same status line.
+"Paused" means new runs are refused and running ones finish.
+
+**Right-click: a short menu**, also frosted glass: Open ClaudeIn, Pause all, Quit.
+
+**Settings window**, frosted glass, with a side menu:
+- **Home:** status, plan use, runs working and waiting.
+- **Devices:** one card per pairing (Signal Lab — Phone, Signal Lab EGX — Phone, Village (this PC)), each with an
+  on/off switch and Forget…, plus "Pair a device".
+- **Usage:** the usage view from 4.5.
+- **General:** runs at once (1–4), Start with Windows, Open logs folder, New local token, and Check Claude Code (asks one
+  tiny Haiku question to confirm the login).
+- **Caps** are added here in phase 2.
+
+The pairing window (4.3) uses the same glass.
+
 - "Signed in ✓" comes from the last run that worked or from "Check Claude Code". ClaudeIn never sends a question on its
   own at start, so it uses no plan time just by running.
-- The windows (pairing, usage, caps) are small Python (tkinter) windows. They are not web pages, so there is no extra
-  page that other programs on the PC could reach.
+- The panel and windows are real desktop windows made with **PySide6 and PySide6-Fluent-Widgets**. They are not web
+  pages, so there is no extra page that other programs on the PC could reach. PySide6's own tray icon is used.
+- PySide6-Fluent-Widgets is free for personal use (GPL licence). That's fine because ClaudeIn stays on this PC and is
+  not sold or shared. PySide6 adds about 150 MB to `.venv`.
 
 ### 4.7 Safety
 
@@ -251,7 +270,7 @@ ClaudeIn\
   CLAUDE.md, docs\plan.md, docs\protocol.md (phase 1)
   Setup-ClaudeIn.bat   makes .venv (Python 3.14 like Village), installs requirements, adds Start Menu and
                        Startup shortcuts that run .venv\Scripts\pythonw.exe -m claudein (no console window)
-  requirements.txt     claude-agent-sdk, aiohttp, cryptography, pystray, Pillow, qrcode (tkinter comes with Python)
+  requirements.txt     claude-agent-sdk, aiohttp, cryptography, PySide6, PySide6-Fluent-Widgets, Pillow, qrcode
   claudein\            the service: config, tls, netguard, pairing, server, queue, runner, usage, tray, windows
   client\claudein_client\   the small Python client library (phase 3)
   tests\
@@ -365,6 +384,7 @@ Covers the caps window, the cap check before each run, the cap message, and rese
 2. **Phone questions go ahead** of waiting program runs (see 4.4).
 3. **Village's tool demos stay direct** (see phase 3).
 4. **A local git repository** is made now. A GitHub repository would be asked about separately.
+5. **Windows 11 Fluent look with Acrylic frosted glass** for the tray panel, menu and windows, built with PySide6 and
+   PySide6-Fluent-Widgets instead of tkinter and pystray (see 4.6). Chosen from a mockup.
 
-Decided here without asking (can be changed): port 8790/8791; `/hello` keeps the old name for now; pairing and usage
-windows are tkinter; 2 runs at once; 20 can wait; runs stop after 15 minutes; logs are kept 14 days.
+Decided here without asking (can be changed): port 8790/8791; `/hello` keeps the old name for now; 2 runs at once; 20 can wait; runs stop after 15 minutes; logs are kept 14 days.
