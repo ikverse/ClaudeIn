@@ -1,6 +1,7 @@
 # ClaudeIn: plan
 
-Status: **plan only, nothing built.** Written 2026-11-15. Every phase below needs its own "approve" before any code is
+Status (2026-11-15): **phase 1 built** (a phone has paired; a phone question through ClaudeIn not yet confirmed) and
+**phase 2 built**. Written 2026-11-15. Every phase below needs its own "approve" before any code is
 written (see `CLAUDE.md`).
 
 ## 1. What ClaudeIn is, in plain words
@@ -221,6 +222,10 @@ the address gets `:8790` on the end, which means re-pairing once.
     - When runs overlapped, the rise is split by their tokens.
     - When the reported number didn't move (small runs, rounding), the share comes from the run's tokens, at the rate
       seen over that day.
+    - **Change (owner, 2026-11-15):** the rise is trusted only when ClaudeIn was busy the whole time since the previous
+      report (no idle gap over 30 seconds); otherwise the owner's own Claude use in the gap could be in it, so the run's
+      tokens are used instead. The rate is today's, else the most recent day's in the last 7 days, else 0. Own use
+      *while* a question runs still lands on that question.
   - **The unit is "plan points".** 100 points = one full 5-hour window. A cap reads, for example, "Village: at most 60
     plan points a day". The usage window shows each app's points for today and the week.
   - These are estimates, because Claude reports only the plan's total. The usage window says so.
@@ -266,6 +271,11 @@ The pairing window (4.3) uses the same glass.
 **Glass check first.** Frosted glass sometimes lags when a window is dragged. So phase 1 starts with a small test
 window that the owner drags around. If it lags, the settings and pairing windows use the calmer Mica glass instead,
 and the small tray panel (which is never dragged) keeps the frosted glass.
+**Result (owner, 2026-11-15):** both Acrylic and Mica dragged smoothly, so **Acrylic is used everywhere** (panel, menu,
+settings and pairing windows). The test window stays as `Glass-Test.bat`.
+**Change (owner, 2026-11-15):** in use, the settings window's Acrylic looked washed-out grey whenever a bright window
+sat behind it (the glass lets about 40% of what's behind show through). So the **settings and pairing windows now use
+Mica**, which tints with the desktop wallpaper and stays dark. The tray panel and menu keep Acrylic.
 
 **Restart after a crash.** "Start with Windows" also sets up a Windows scheduled task, in the owner's own account with
 no admin rights, that starts ClaudeIn again within a minute if it has stopped without Quit. Quit leaves it stopped
@@ -330,6 +340,8 @@ The Kotlin host then stays unused. Retiring it is an app-project change (section
 
 ### Phase 2: caps
 Covers the caps window, the cap check before each run, the cap message, and resetting at midnight (PC time).
+**Built 2026-11-15** (Caps page in Settings, points columns in Usage, cap check when asked and again before a waiting
+question starts). Waiting on the owner's hand check 8.
 
 ### Phase 3: Python client library and the Village move
 - **Client library** (here, in `client\`), used like this:
