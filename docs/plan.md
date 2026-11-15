@@ -1,7 +1,8 @@
 # ClaudeIn: plan
 
 Status (2026-11-15): **phase 1 built** (a phone has paired; a phone question through ClaudeIn not yet confirmed) and
-**phase 2 built**. Written 2026-11-15. Every phase below needs its own "approve" before any code is
+**phase 2 built**; **phase 3's client library built** (the Village move waits for Village's project). Written
+2026-11-15. Every phase below needs its own "approve" before any code is
 written (see `CLAUDE.md`).
 
 ## 1. What ClaudeIn is, in plain words
@@ -344,6 +345,9 @@ Covers the caps window, the cap check before each run, the cap message, and rese
 question starts). Waiting on the owner's hand check 8.
 
 ### Phase 3: Python client library and the Village move
+**Client library built 2026-11-15** (`client\claudein_client`, no add-ons; how to use it: `docs/protocol.md` 3.4).
+**The Village move is not started:** it waits for approval inside Village's project (handover:
+`docs/village-handover.md`).
 - **Client library** (here, in `client\`), used like this:
   ```python
   async for event in claudein_client.run(app="village", model=..., system=..., prompt=...,

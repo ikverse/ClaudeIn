@@ -172,6 +172,38 @@ points-per-token rate: today's, else the most recent day's in the last 7 days, e
 When Claude calls one of the app's tools, ClaudeIn sends a `tool` event and waits up to `tool_timeout_s` seconds for the
 answer. With no answer in time, Claude is told "The phone did not answer within 60 seconds." (or "The app …") and goes on.
 
+## 3.4 Using the Python client (programs on this PC)
+
+Python programs don't need to speak this protocol themselves. The `claudein_client` package (in ClaudeIn's `client\`
+folder) does it, with no add-ons to install. Install it into the program's own environment with:
+`pip install -e <path to ClaudeIn>\client`
+
+```python
+import claudein_client
+from claudein_client import Tool, Image
+
+async def get_notes(args):                 # a normal or an async function
+    return "the notes"                     # text, Image(...), a list of both, or an MCP-style dict
+
+async for event in claudein_client.run(app="village", model="claude-opus-5-5", system="...", prompt="...",
+                                       tools=[Tool("get_notes", "Reads the notes.", schema, get_notes)],
+                                       builtin_tools=[], max_turns=20, max_budget_usd=2):
+    ...   # Started, Text, Working, ServerTool, ToolCall, then Done(result)
+
+result = await claudein_client.ask(...)    # the same, just the result
+result.ok, result.ending, result.answer, result.messages, result.usage, result.api_price_usd,
+result.turns, result.limits, result.error_kind, result.reason
+```
+- It reads `local.json` for the token and port, and reads it again once if ClaudeIn says the token is wrong.
+- It runs the program's tool handlers and sends their answers back. A handler that crashes becomes an error answer for
+  Claude. A normal (non-async) handler runs on the event loop's own thread.
+- `result.messages` is the answer split where Claude stopped to use a tool, in order.
+- `ClaudeInUnavailable` means "PC not available" (ClaudeIn isn't running or set up). `ClaudeInError` means ClaudeIn
+  refused the request outright (400, 401, 403).
+- Stopping early (`break` with `aclose()`, or cancelling the task) stops the run on the PC too.
+- For tests, `claudein_client.testing.FakeClaudeIn` has the same `run()` and `ask()`, scripted with `reply()`,
+  `fail()` and `unavailable()`.
+
 ## 4. Queue
 
 ClaudeIn runs a few questions at once (2 by default; the owner can pick 1–4). The rest wait in order, and phone questions
