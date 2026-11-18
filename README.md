@@ -8,6 +8,8 @@ Claude through **Claude Code**, signed in with your Claude plan account. Your ap
   ClaudeIn is never open to the internet.
 - Programs on the PC connect to `127.0.0.1` with a local token.
 - A queue (2 runs at once by default), a usage view per app, optional daily caps per app, and allowed models per app.
+- Apps can send pictures with a question, ask for answers in a set shape their code can read, run long jobs that
+  carry on if the app disconnects, and mark jobs as background so they wait behind people's questions.
 - If ClaudeIn isn't running, apps say "PC not available". There is never an API-key fallback.
 
 ## Connecting your project
@@ -18,6 +20,9 @@ Claude through **Claude Code**, signed in with your Claude plan account. Your ap
 - working examples (asking, streaming, your own tools, tests with `FakeClaudeIn`);
 - how to handle every way a run can end;
 - the rules every connected app follows, a block to paste into your project's `CLAUDE.md`, and a checklist.
+
+Apps can check the `features` list in `/hello` or `/check` to see which of the newer abilities (pictures, set-shape
+answers, long runs, background priority) this PC offers right now.
 
 The quickest start, for a Python program on this PC:
 
@@ -49,7 +54,7 @@ signature.
 | File | What it is |
 |---|---|
 | [`docs/connecting-an-app.md`](docs/connecting-an-app.md) | How to connect an app (start here) |
-| [`docs/protocol.md`](docs/protocol.md) | The full protocol: addresses, routes, events, endings, queue |
+| [`docs/protocol.md`](docs/protocol.md) | The full protocol (version 2): addresses, routes, events, endings, queue |
 | [`docs/plan.md`](docs/plan.md) | The design and the phases |
 | [`docs/village-handover.md`](docs/village-handover.md) | Notes for moving one existing app onto ClaudeIn |
 | [`client/`](client/) | The `claudein_client` Python library |

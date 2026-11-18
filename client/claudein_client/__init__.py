@@ -17,7 +17,7 @@ For tests, claudein_client.testing.FakeClaudeIn has the same run() and ask().
 from ._client import (ClaudeInError, ClaudeInUnavailable, Done, Event, Image, Result, RunState, ServerTool, Started,
                       Text, Tool, ToolCall, Working, ask, get_run, resume, run)
 
-__version__ = "0.1.0"
+__version__ = "0.2.0"
 
 __all__ = ["run", "ask", "get_run", "resume", "RunState", "Tool", "Image", "Result", "Event", "Started", "Text",
            "Working", "ServerTool", "ToolCall", "Done", "ClaudeInUnavailable", "ClaudeInError", "__version__"]

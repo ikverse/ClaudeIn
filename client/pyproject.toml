@@ -1,6 +1,6 @@
 [project]
 name = "claudein-client"
-version = "0.1.0"
+version = "0.2.0"
 description = "Ask Claude through ClaudeIn from a program on this PC (no API keys, no add-ons)."
 requires-python = ">=3.11"
 dependencies = []
