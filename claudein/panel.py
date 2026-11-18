@@ -2,14 +2,15 @@
 
 from __future__ import annotations
 
+import asyncio
 import time
 from typing import TYPE_CHECKING, Callable
 
 from PySide6.QtCore import QEvent, QRect, Qt, QTimer
 from PySide6.QtGui import QGuiApplication, QIcon
 from PySide6.QtWidgets import QHBoxLayout, QLabel, QVBoxLayout, QWidget
-from qfluentwidgets import (BodyLabel, CaptionLabel, FluentIcon, HorizontalSeparator, ProgressBar, StrongBodyLabel,
-                            TogglePushButton, TransparentPushButton, isDarkTheme)
+from qfluentwidgets import (BodyLabel, CaptionLabel, FluentIcon, HorizontalSeparator, PrimaryPushButton, ProgressBar,
+                            StrongBodyLabel, TogglePushButton, TransparentPushButton, isDarkTheme)
 from qframelesswindow import AcrylicWindow
 
 from . import autostart
@@ -71,6 +72,9 @@ class Panel(AcrylicWindow):
         self.problem.setWordWrap(True)
         self.problem.setTextColor("#c42b1c", "#ff99a4")
         v.addWidget(self.problem)
+        self.setup_b = PrimaryPushButton(FluentIcon.PEOPLE, "Sign in with Claude")
+        self.setup_b.clicked.connect(lambda: self._setup(open_settings))
+        v.addWidget(self.setup_b)
 
         v.addWidget(HorizontalSeparator())
         bottom = QHBoxLayout()
@@ -85,6 +89,14 @@ class Panel(AcrylicWindow):
     def _autostart(self, on: bool) -> None:
         if on != autostart.enabled():
             autostart.set_enabled(on)
+
+    def _setup(self, open_settings: Callable[[str], None]) -> None:
+        """Signed out: start the browser sign-in and show its progress. Anything else wrong: show the Claude page."""
+        c = self.svc.claude
+        self.hide()
+        open_settings("claude")
+        if c.state == "ok" and c.signed_in is not True and c.login.state != "waiting":
+            asyncio.ensure_future(self.svc.sign_in())
 
     def refresh(self) -> None:
         st = self.svc.status()
@@ -102,6 +114,9 @@ class Panel(AcrylicWindow):
         self.claude.setText(claude_line(st))
         self.problem.setText("\n".join(st["problems"]))
         self.problem.setVisible(bool(st["problems"]))
+        c = st["claude"]
+        self.setup_b.setVisible(c["needs_setup"] and c["state"] != "checking")
+        self.setup_b.setText("Sign in with Claude" if c["state"] == "ok" else "Set up Claude…")
         self.adjustSize()
 
     def toggle(self, tray_rect: QRect) -> None:

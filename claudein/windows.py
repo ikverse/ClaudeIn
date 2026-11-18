@@ -17,8 +17,8 @@ from datetime import datetime
 from pathlib import Path
 from typing import TYPE_CHECKING, Callable
 
-from PySide6.QtCore import QEvent, Qt, QTimer
-from PySide6.QtGui import QColor, QFont, QGuiApplication, QPixmap
+from PySide6.QtCore import QEvent, Qt, QTimer, QUrl
+from PySide6.QtGui import QColor, QDesktopServices, QFont, QGuiApplication, QPixmap
 from PySide6.QtWidgets import (QFileDialog, QFrame, QHBoxLayout, QHeaderView, QLabel, QTableWidgetItem, QVBoxLayout,
                                QWidget)
 from qfluentwidgets import (BodyLabel, CaptionLabel, ComboBox, EditableComboBox, FluentIcon, FluentWidget,
@@ -28,6 +28,7 @@ from qfluentwidgets import (BodyLabel, CaptionLabel, ComboBox, EditableComboBox,
                             TitleLabel, isDarkTheme)
 
 from . import autostart, tls
+from .claudecode import INSTALL_PAGE, KNOWN_GOOD, safe_link
 from .pairing import shown
 from .service import lan_addresses
 from .usage import ENDINGS, start_of_today
@@ -125,10 +126,12 @@ def row(icon, title: str, text: str, widget: QWidget | None) -> SimpleCardWidget
     col = QVBoxLayout()
     col.setSpacing(0)
     col.addWidget(StrongBodyLabel(title))
+    card.caption = None  # the explanation label, for cards whose words change
     if text:
         cap = CaptionLabel(text)
         cap.setWordWrap(True)
         col.addWidget(cap)
+        card.caption = cap
     h.addLayout(col, 1)
     if widget is not None:
         h.addWidget(widget, 0, Qt.AlignmentFlag.AlignVCenter)
@@ -182,10 +185,21 @@ def status_line(st: dict) -> str:
     return f"{state} · {st['working']} working, {st['waiting']} waiting"
 
 
+STATE_WORDS = {"checking": "checking…", "missing": "not installed", "broken": "won't start",
+               "too_old": "too old for ClaudeIn", "incompatible": "not compatible with ClaudeIn yet"}
+
+
 def claude_line(st: dict) -> str:
-    v = st["claude_version"] or "missing"
-    s = {True: "signed in ✓", False: "signed out ✗", None: "not checked yet"}[st["signed_in"]]
-    return f"Claude Code {v} — {s}"
+    c = st["claude"]
+    if c["state"] != "ok":
+        v = f" {c['version']}" if c["version"] else ""
+        return f"Claude Code{v} — {STATE_WORDS[c['state']]}"
+    if st["signed_in"] is True:
+        who = c["email"] or "your Claude account"
+        s = f"signed in as {who}" + (f" ({c['plan']})" if c["plan"] else "") + " ✓"
+    else:
+        s = {False: "signed out ✗", None: "not checked yet"}[st["signed_in"]]
+    return f"Claude Code {c['version']} — {s}"
 
 
 def plan_text(plan: dict | None) -> tuple[int, str]:
@@ -225,8 +239,11 @@ class HomePage(Page):
         self.plan_words = CaptionLabel("")
         pv.addWidget(self.plan_words)
         self.v.addWidget(plan)
-        self.claude = row(FluentIcon.ROBOT, "Claude Code", "", None)
+        self.setup_b = PrimaryPushButton(FluentIcon.PEOPLE, "Set up Claude…")
+        self.setup_b.clicked.connect(lambda: self.window().open("claude"))
+        self.claude = row(FluentIcon.ROBOT, "Claude Code", "", self.setup_b)
         self.claude_text = CaptionLabel("")
+        self.claude_text.setWordWrap(True)
         self.claude.layout().itemAt(1).layout().addWidget(self.claude_text)
         self.v.addWidget(self.claude)
         self.v.addWidget(StrongBodyLabel("Questions now"))
@@ -239,7 +256,8 @@ class HomePage(Page):
         pct, words = plan_text(st["plan"])
         self.bar.setValue(pct)
         self.plan_words.setText(words + "  (for the whole Claude plan)")
-        self.claude_text.setText(claude_line(st) + (". It updates when Setup-ClaudeIn.bat is run again."))
+        self.claude_text.setText(claude_line(st))
+        self.setup_b.setVisible(st["claude"]["needs_setup"])
         clear(self.runs_box)
         s = self.svc.scheduler
         items = [(r, "working") for r, _ in s.running.values()] + [(r, "waiting") for r in s.waiting]
@@ -248,6 +266,227 @@ class HomePage(Page):
         for r, what in items:
             self.runs_box.addWidget(row(FluentIcon.PHONE if r.is_phone else FluentIcon.HOME, r.device_label,
                                         f"{what} · {r.spec.model} · asked {when(r.asked_at)}", None))
+
+
+def hbox(*widgets: QWidget) -> QWidget:
+    """Widgets side by side, for the right-hand end of a settings card."""
+    box = QWidget()
+    h = QHBoxLayout(box)
+    h.setContentsMargins(0, 0, 0, 0)
+    h.setSpacing(8)
+    for w in widgets:
+        h.addWidget(w)
+    return box
+
+
+def go(coro) -> None:
+    """Starts an async action from a button; the engine's loop runs it."""
+    asyncio.ensure_future(coro)
+
+
+class ClaudePage(Page):
+    """Step 1: Claude Code on this PC. Step 2: the Claude account whose plan ClaudeIn uses. Then the safety net."""
+
+    def __init__(self, svc: "Service"):
+        super().__init__("claude", "Claude")
+        self.svc = svc
+        intro = BodyLabel("ClaudeIn answers your apps with Claude Code on this PC, signed in with the Claude account you "
+                          "choose. What your apps ask counts against that account's plan.")
+        intro.setWordWrap(True)
+        self.v.addWidget(intro)
+
+        self.download_b = PrimaryPushButton(FluentIcon.LINK, "Open download page")
+        self.download_b.clicked.connect(lambda: QDesktopServices.openUrl(QUrl(INSTALL_PAGE)))
+        self.check_b = PushButton(FluentIcon.SYNC, "Check again")
+        self.check_b.clicked.connect(lambda: go(self.svc.recheck_claude()))
+        self.step1 = row(FluentIcon.ROBOT, "1 · Claude Code", "Checking…", hbox(self.download_b, self.check_b))
+        self.v.addWidget(self.step1)
+
+        self.sign_b = PrimaryPushButton(FluentIcon.PEOPLE, "Sign in with Claude")
+        self.sign_b.clicked.connect(lambda: go(self.svc.sign_in()))
+        self.switch_b = PushButton(FluentIcon.SYNC, "Switch account")
+        self.switch_b.clicked.connect(lambda: go(self._switch()))
+        self.out_b = PushButton(FluentIcon.CLOSE, "Sign out")
+        self.out_b.clicked.connect(lambda: go(self.svc.sign_out()))
+        self.step2 = row(FluentIcon.PEOPLE, "2 · Claude account", "…", hbox(self.sign_b, self.switch_b, self.out_b))
+        self.v.addWidget(self.step2)
+
+        self.waiting = SimpleCardWidget()
+        wv = QVBoxLayout(self.waiting)
+        wv.setContentsMargins(16, 12, 16, 12)
+        wv.addWidget(StrongBodyLabel("Finish signing in, in your browser"))
+        words = CaptionLabel("A Claude page opened in your browser. Choose the account whose plan you want ClaudeIn to "
+                             "use. This window updates by itself when you are done.")
+        words.setWordWrap(True)
+        wv.addWidget(words)
+        self.again_b = PushButton(FluentIcon.LINK, "Open the page again")
+        self.again_b.clicked.connect(self._open_link)
+        self.copy_b = PushButton(FluentIcon.COPY, "Copy link")
+        self.copy_b.clicked.connect(self._copy_link)
+        cancel = PushButton(FluentIcon.CANCEL, "Cancel")
+        cancel.clicked.connect(self.svc.cancel_sign_in)
+        wv.addWidget(hbox(self.again_b, self.copy_b, cancel), 0, Qt.AlignmentFlag.AlignLeft)
+        self.v.addWidget(self.waiting)
+
+        self.own_login = SwitchButton()
+        self.own_login.setOnText("On")
+        self.own_login.setOffText("Off")
+        self.own_login.checkedChanged.connect(lambda on: go(self.svc.set_own_login(on)))
+        self.v.addWidget(row(FluentIcon.CERTIFICATE, "Its own Claude login",
+                             "On: ClaudeIn keeps its own sign-in, so it can use a different account from the one you use "
+                             "in a terminal. Off: it uses the sign-in of Claude Code on this PC.", self.own_login))
+
+        self.v.addSpacing(8)
+        self.v.addWidget(StrongBodyLabel("Claude Code versions ClaudeIn has seen"))
+        self.versions_box = QVBoxLayout()
+        self.versions_box.setSpacing(8)
+        self.v.addLayout(self.versions_box)
+        self._shape = None
+
+        self.v.addSpacing(8)
+        self.v.addWidget(StrongBodyLabel("Advanced"))
+        self.own_b = PushButton(FluentIcon.DOWNLOAD, f"Download {KNOWN_GOOD}…")
+        self.own_b.clicked.connect(self._download)
+        self.installed_b = PushButton(FluentIcon.HOME, "Use the one on this PC")
+        self.installed_b.clicked.connect(lambda: go(self.svc.use_installed_claude()))
+        self.copy_row = row(FluentIcon.CLOUD_DOWNLOAD, "A known-good copy for ClaudeIn",
+                            f"If a Claude Code update stops working with ClaudeIn, ClaudeIn can use its own copy of "
+                            f"version {KNOWN_GOOD} instead (about 355 MB). It is downloaded from Anthropic, checked against "
+                            "Anthropic's checksum and signature, and never updates itself. Your own Claude Code isn't "
+                            "touched.", hbox(self.own_b, self.installed_b))
+        self.copy_base = self.copy_row.caption.text()
+        self.v.addWidget(self.copy_row)
+        self.progress = ProgressBar()
+        self.progress.hide()
+        self.v.addWidget(self.progress)
+
+    # --- actions ---------------------------------------------------------------------------------------------------------
+
+    async def _switch(self) -> None:
+        await self.svc.sign_out()
+        await self.svc.sign_in()
+
+    def _open_link(self) -> None:
+        url = self.svc.claude.login.url
+        if safe_link(url):
+            QDesktopServices.openUrl(QUrl(url))
+
+    def _copy_link(self) -> None:
+        url = self.svc.claude.login.url
+        if safe_link(url):
+            QGuiApplication.clipboard().setText(url)
+            InfoBar.success("Link copied", "Paste it into any browser to sign in.", duration=3000,
+                            position=InfoBarPosition.TOP, parent=self.window())
+
+    def _download(self) -> None:
+        box = MessageBox(f"Download Claude Code {KNOWN_GOOD}?",
+                         "ClaudeIn will download Claude Code (about 355 MB) from Anthropic (downloads.claude.ai) and use it "
+                         "only for itself. It checks Anthropic's checksum and signature first. Your own Claude Code "
+                         "isn't changed.", self.window())
+        box.yesButton.setText("Download")
+        box.cancelButton.setText("Cancel")
+        if box.exec():
+            go(self._run_download())
+
+    async def _run_download(self) -> None:
+        ok = await self.svc.install_claude_copy()
+        if ok:
+            InfoBar.success("Claude Code is ready", f"ClaudeIn now uses its own copy of Claude Code {KNOWN_GOOD}.",
+                            duration=6000, position=InfoBarPosition.TOP, parent=self.window())
+        else:
+            InfoBar.error("Couldn't get Claude Code", self.svc.claude.install.error or "Try again.", duration=-1,
+                          position=InfoBarPosition.TOP, parent=self.window())
+
+    # --- showing ---------------------------------------------------------------------------------------------------------
+
+    def refresh(self) -> None:
+        svc = self.svc
+        c = svc.claude
+        state = c.state
+
+        if state == "ok":
+            where = "ClaudeIn's own copy" if svc.settings.claude_copy == "own" else "installed on this PC"
+            text = f"Found version {c.version}, {where}.\n{c.path}"
+            if c.suspect:
+                text += "\n" + (c.explain() or "")
+            if c.probe and c.probe.missing_optional:
+                text += "\nNot in this version, so left out: " + ", ".join(c.probe.missing_optional)
+        elif state == "checking":
+            text = "Checking…"
+        else:
+            text = c.explain() or ""
+        self.step1.caption.setText(text)
+        self.download_b.setVisible(state in ("missing", "broken", "too_old"))
+
+        waiting = c.login.state == "waiting"
+        usable = state == "ok"
+        if not usable:
+            words = "Do step 1 first."
+        elif c.signed_in is True and c.account is not None:
+            words = f"Signed in as {c.account.label}. ClaudeIn uses this account's plan."
+        elif c.wrong_account_type:
+            words = c.signed_out_message() or ""
+        elif c.signed_in is False:
+            words = "Not signed in. Press Sign in with Claude and a browser page opens."
+        else:
+            words = "Couldn't tell whether Claude Code is signed in. Press Check again, or Sign in with Claude."
+        if c.login.state == "failed" and c.login.error:
+            words += "\n" + c.login.error
+        self.step2.caption.setText(words)
+        signed = usable and c.signed_in is True
+        self.sign_b.setVisible(usable and not signed)
+        self.switch_b.setVisible(signed)
+        self.out_b.setVisible(signed or (usable and c.wrong_account_type))
+        for b in (self.sign_b, self.switch_b, self.out_b, self.check_b):
+            b.setEnabled(not waiting)
+        self.waiting.setVisible(waiting)
+        self.again_b.setEnabled(bool(c.login.url))
+        self.copy_b.setEnabled(bool(c.login.url))
+
+        self.own_login.blockSignals(True)
+        self.own_login.setChecked(svc.settings.own_login)
+        self.own_login.blockSignals(False)
+
+        rows = c.versions()
+        shape = tuple((r["version"], r["check"], r["good"], r["bad"], r["current"]) for r in rows)
+        if shape != self._shape:
+            self._shape = shape
+            clear(self.versions_box)
+            if not rows:
+                self.versions_box.addWidget(CaptionLabel("None yet."))
+            for r in rows:
+                ok = r["check"] == "ok" and not (r["bad"] and not r["good"])
+                if r["check"] == "ok":
+                    what = "Passed the check"
+                    if r["good"] or r["bad"]:
+                        what += f" · {r['good']} questions answered"
+                        if r["bad"]:
+                            what += f" · {r['bad']} stopped without an answer"
+                elif r["check"] == "incompatible":
+                    what = "Not compatible: it lacks " + (", ".join(r["missing"]) or "something ClaudeIn needs")
+                elif r["check"] == "too_old":
+                    what = "Too old for ClaudeIn"
+                else:
+                    what = "Didn't start"
+                title = r["version"] + ("  (in use)" if r["current"] else "")
+                self.versions_box.addWidget(row(FluentIcon.ACCEPT if ok else FluentIcon.CANCEL, title, what, None))
+
+        own = svc.settings.claude_copy == "own"
+        busy = c.install.state in ("downloading", "verifying")
+        self.own_b.setEnabled(not busy)
+        self.own_b.setVisible(not own)
+        self.installed_b.setVisible(own)
+        extra = ""
+        if busy:
+            mb = c.install.done / 1e6
+            extra = (f"\nDownloading… {mb:.0f} of {c.install.total / 1e6:.0f} MB" if c.install.state == "downloading"
+                     else "\nChecking the download…")
+        elif c.install.state == "failed":
+            extra = "\nLast try failed: " + (c.install.error or "")
+        self.copy_row.caption.setText(self.copy_base + extra)
+        self.progress.setVisible(busy)
+        if busy and c.install.total:
+            self.progress.setValue(min(100, round(100 * c.install.done / c.install.total)))
 
 
 class DevicesPage(Page):
@@ -551,8 +790,9 @@ class GeneralPage(Page):
         self.check_b = PushButton(FluentIcon.SEND, "Check")
         self.check_b.clicked.connect(lambda: asyncio.ensure_future(self._check()))
         self.v.addWidget(row(FluentIcon.ROBOT, "Check Claude Code",
-                             "Asks Claude one tiny Haiku question to confirm the login works. Uses a very small "
-                             "amount of the plan.", self.check_b))
+                             "Asks Claude one tiny Haiku question to confirm it really answers. Uses a very small "
+                             "amount of the plan. (Signing in and the version check are on the Claude page and cost "
+                             "nothing.)", self.check_b))
 
     def refresh(self) -> None:
         self.workers.blockSignals(True)
@@ -645,11 +885,13 @@ class SettingsWindow(GlassMixin, FluentWindow):
         self.resize(980, 720)
         self.setMinimumSize(760, 520)
         self.home = HomePage(svc)
+        self.claude = ClaudePage(svc)
         self.devices = DevicesPage(svc, open_pairing)
         self.usage = UsagePage(svc)
         self.caps = CapsPage(svc)
         self.general = GeneralPage(svc, restart)
         self.addSubInterface(self.home, FluentIcon.HOME, "Home")
+        self.addSubInterface(self.claude, FluentIcon.ROBOT, "Claude")
         self.addSubInterface(self.devices, FluentIcon.PHONE, "Devices")
         self.addSubInterface(self.usage, FluentIcon.PIE_SINGLE, "Usage")
         self.addSubInterface(self.caps, FluentIcon.SPEED_OFF, "Caps")

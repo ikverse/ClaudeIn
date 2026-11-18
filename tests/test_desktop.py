@@ -17,7 +17,7 @@ from claudein import __main__ as entry
 from claudein import autostart
 from claudein.service import Service
 
-from .conftest import rate_limit, result, spec
+from .conftest import make_claude, rate_limit, result, spec
 
 
 @pytest.fixture(scope="module")
@@ -120,7 +120,8 @@ def test_tray_states(qapp):
 async def test_no_question_at_start(svc, fake):
     st = svc.status()
     assert fake.calls == []  # starting (and showing the status) never asks Claude anything
-    assert st["signed_in"] is None and st["plan"] is None
+    assert st["signed_in"] is True and st["plan"] is None  # signed in comes from `auth status`, which is free
+    assert st["claude"]["state"] == "ok" and st["claude"]["email"] == "owner@example.com"
     assert st["problems"] == []
 
 
@@ -155,15 +156,14 @@ async def test_signed_out_is_a_problem(svc, phone, fake):
     assert any("signed out" in p for p in svc.status()["problems"])
 
 
-async def test_signed_in_remembered_from_usage(home, fake):
-    s = Service(home, query_fn=fake.query)
+async def test_plan_use_remembered_from_usage(home, fake):
+    s = Service(home, query_fn=fake.query, claude=make_claude(home)[0])
     await s.start(use_tls=False, phone_port=0, local_port=0)
     await s.check_claude()
     await s.stop()
-    s2 = Service(home, query_fn=fake.query)
+    s2 = Service(home, query_fn=fake.query, claude=make_claude(home)[0])
     try:
-        assert s2.signed_in() is True  # from the last run in usage.db, without asking again
-        assert s2.plan_use()["five_hour"] == 0.34
+        assert s2.plan_use()["five_hour"] == 0.34  # from the last run in usage.db, without asking again
     finally:
         s2.usage.close()
 
@@ -173,7 +173,7 @@ async def test_port_in_use_is_a_problem(home, fake):
     blocker.bind(("127.0.0.1", 0))
     blocker.listen()
     port = blocker.getsockname()[1]
-    s = Service(home, query_fn=fake.query)
+    s = Service(home, query_fn=fake.query, claude=make_claude(home)[0])
     s.settings.local_port = port
     try:
         await s.start_safely()

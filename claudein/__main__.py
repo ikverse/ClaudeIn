@@ -4,6 +4,10 @@
     pythonw -m claudein --watchdog      from the restart task: does nothing if running, or after Quit
     pythonw -m claudein --after-restart after Restore pairings: waits for the old copy to finish closing
     python  -m claudein --setup         from Setup-ClaudeIn.bat: icon file and Start Menu shortcut
+    python  -m claudein --remove-startup  from the uninstaller: removes the Startup shortcut and restart task that start
+                                        this program (not another copy's)
+
+Installed with ClaudeIn-Setup.exe, the same commands are given to ClaudeIn.exe (without `-m claudein`).
 """
 
 from __future__ import annotations
@@ -87,6 +91,9 @@ def main(argv: list[str]) -> int:
     if "--setup" in argv:
         setup()
         return 0
+    if "--remove-startup" in argv:  # from the uninstaller: remove the Startup shortcut and restart task that are ours
+        autostart.remove_if_ours()
+        return 0
     watchdog = "--watchdog" in argv
     if watchdog and autostart.quit_flag_set():
         return 0  # the owner chose Quit; stay off until the next sign-in
@@ -147,6 +154,8 @@ def main(argv: list[str]) -> int:
         if svc.settings.keep_awake:
             svc.scheduler.set_keep_awake(True)  # "Keep PC awake" was left on
         holder["tray"] = Tray(svc, quit_, restart)
+        if svc.claude.needs_setup():  # first run, or Claude Code or the sign-in is missing: show the two steps
+            holder["tray"].open_settings("claude")
         await done.wait()
         holder["tray"].hide()
         await svc.stop()
@@ -156,7 +165,8 @@ def main(argv: list[str]) -> int:
     finally:
         theme_listener.terminate()
     if restart_wanted["on"]:
-        QProcess.startDetached(str(autostart.pythonw()), ["-m", "claudein", "--after-restart"], str(autostart.PROJECT))
+        QProcess.startDetached(str(autostart.pythonw()), autostart.launch_args("--after-restart").split(),
+                               str(autostart.PROJECT))
     return 0
 
 

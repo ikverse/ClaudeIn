@@ -360,7 +360,9 @@ async def _noop():
 async def test_tls_certificate_is_the_pinned_one(home, fake):
     from claudein.service import Service
 
-    s = Service(home, query_fn=fake.query)
+    from .conftest import make_claude
+
+    s = Service(home, query_fn=fake.query, claude=make_claude(home)[0])
     await s.start(use_tls=True, phone_port=0, local_port=0)
     try:
         ctx = ssl.create_default_context()

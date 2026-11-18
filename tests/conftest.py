@@ -13,6 +13,7 @@ import pytest_asyncio
 from claude_agent_sdk._internal.message_parser import parse_message
 
 from claudein import server as server_mod
+from claudein.claudecode import OPTIONAL_FLAGS, REQUIRED_FLAGS, ClaudeCode, CliResult
 from claudein.service import Service
 
 DATA = Path(__file__).parent / "data"
@@ -101,6 +102,111 @@ def fake() -> FakeClaude:
     return FakeClaude()
 
 
+EMAIL = "owner@example.com"
+LOGIN_LINK = "https://claude.com/cai/oauth/authorize?code=true&client_id=test&state=secretstate"
+
+
+def help_text(flags: list[str]) -> str:
+    return "Usage: claude [options] [prompt]\n\nOptions:\n" + "".join(f"  {f} <value>  does something\n" for f in flags)
+
+
+class FakeProc:
+    """The running `claude auth login`: prints its lines, then waits until finished or killed."""
+
+    def __init__(self, cli: "FakeCli"):
+        self.cli = cli
+        self.killed = False
+        self.done = asyncio.Event()
+        if cli.login_finishes_at_once:
+            self.done.set()
+
+    async def lines(self):
+        for line in self.cli.login_lines:
+            yield line
+
+    async def wait(self) -> int:
+        await self.done.wait()
+        if self.killed:
+            return 1
+        if self.cli.login_exit == 0 and self.cli.login_signs_in:
+            self.cli.signed_in = True
+        return self.cli.login_exit
+
+    def kill(self) -> None:
+        self.killed = True
+        self.done.set()
+
+
+class FakeCli:
+    """Stands in for the claude program's own commands: --version, --help, auth status, auth login, auth logout."""
+
+    def __init__(self):
+        self.version = "2.1.325"
+        self.flags = [a[0] for a in REQUIRED_FLAGS] + list(OPTIONAL_FLAGS)
+        self.signed_in = True
+        self.method = "claude.ai"
+        self.email = EMAIL
+        self.broken = False  # the program doesn't start
+        self.calls: list[tuple[list, dict]] = []
+        self.procs: list[FakeProc] = []
+        self.login_lines = ["Opening browser to sign in…", f"If the browser didn't open, visit: {LOGIN_LINK}"]
+        self.login_finishes_at_once = True
+        self.login_exit = 0
+        self.login_signs_in = True
+
+    def count(self, *args: str) -> int:
+        return sum(1 for a, _ in self.calls if a == list(args))
+
+    async def run(self, exe, args, env, timeout) -> CliResult:
+        self.calls.append((list(args), dict(env)))
+        if self.broken:
+            return CliResult(-1, "", "not a valid program")
+        if args == ["--version"]:
+            return CliResult(0, f"{self.version} (Claude Code)\n")
+        if args == ["--help"]:
+            return CliResult(0, help_text(self.flags))
+        if args[:2] == ["auth", "status"]:
+            if not self.signed_in:
+                return CliResult(1, json.dumps({"loggedIn": False, "authMethod": "none"}))
+            return CliResult(0, json.dumps({"loggedIn": True, "authMethod": self.method, "email": self.email,
+                                            "subscriptionType": "max", "planTier": "max_5x"}))
+        if args[:2] == ["auth", "logout"]:
+            self.signed_in = False
+            return CliResult(0, "Logged out\n")
+        return CliResult(1, "", "unknown command")
+
+    async def spawn(self, exe, args, env) -> FakeProc:
+        self.calls.append((list(args), dict(env)))
+        proc = FakeProc(self)
+        self.procs.append(proc)
+        return proc
+
+
+def make_claude(folder: Path, cli: FakeCli | None = None, **kw) -> tuple[ClaudeCode, FakeCli]:
+    """The guard, around a fake claude program (a stand-in file, so its size and date can change like an update)."""
+    cli = cli or FakeCli()
+    exe = folder / "fake-claude" / "claude.exe"
+    exe.parent.mkdir(parents=True, exist_ok=True)
+    exe.write_bytes(b"fake claude 1")
+    kw.setdefault("find", lambda c: exe if exe.exists() else None)
+    claude = ClaudeCode(folder, cli=cli.run, spawn=cli.spawn, **kw)
+    claude.fake_exe = exe  # type: ignore[attr-defined]
+    return claude, cli
+
+
+def update_fake_claude(claude: ClaudeCode, cli: FakeCli, version: str, flags: list[str] | None = None) -> None:
+    """What a Claude Code update does: a new version, a new file, maybe different flags."""
+    cli.version = version
+    if flags is not None:
+        cli.flags = flags
+    claude.fake_exe.write_bytes(b"fake claude " + version.encode() + b" with a different size")  # type: ignore[attr-defined]
+
+
+@pytest.fixture
+def cli() -> FakeCli:
+    return FakeCli()
+
+
 @pytest.fixture
 def home(tmp_path, monkeypatch) -> Path:
     monkeypatch.setenv("CLAUDEIN_HOME", str(tmp_path))
@@ -109,8 +215,9 @@ def home(tmp_path, monkeypatch) -> Path:
 
 
 @pytest_asyncio.fixture
-async def svc(home, fake) -> AsyncIterator[Service]:
-    s = Service(home, query_fn=fake.query)
+async def svc(home, fake, cli) -> AsyncIterator[Service]:
+    claude, _ = make_claude(home, cli)
+    s = Service(home, query_fn=fake.query, claude=claude)
     await s.start(use_tls=False, phone_port=0, local_port=0)
     try:
         yield s

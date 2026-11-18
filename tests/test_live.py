@@ -1,6 +1,9 @@
 """One tiny Haiku question through the real Claude Code. Off by default; it uses a little plan time.
 
     set CLAUDEIN_LIVE=1 && .venv\\Scripts\\python.exe -m pytest tests\\test_live.py -s
+
+ClaudeIn uses its own Claude login, so sign in once in ClaudeIn first, or also set CLAUDEIN_LIVE_PC_LOGIN=1 to use the
+login of the Claude Code installed on this PC instead. (The test folder is a temporary one, so it needs the second.)
 """
 
 from __future__ import annotations
@@ -20,7 +23,9 @@ pytestmark = [pytest.mark.live,
 
 @pytest_asyncio.fixture
 async def real(home):
-    s = Service(home)  # the real Claude Code, through the SDK
+    s = Service(home)  # the real Claude Code installed on this PC, through the SDK
+    if os.environ.get("CLAUDEIN_LIVE_PC_LOGIN") == "1":
+        s.settings.own_login = False  # use this PC's own Claude Code login (ClaudeIn's own login needs a browser sign-in)
     await s.start(use_tls=False, phone_port=0, local_port=0)
     try:
         yield s
@@ -47,4 +52,4 @@ async def test_live_haiku_with_a_tool(real):
     assert done["ending"] == "done"
     assert "pelican" in done["answer"].lower()
     assert done["usage"]["output"] > 0
-    assert real.runner.signed_in is True
+    assert real.claude.signed_in is True and real.claude.state == "ok"

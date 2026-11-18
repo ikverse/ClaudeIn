@@ -1,14 +1,16 @@
 # ClaudeIn: plan
 
 Status (2026-11-15): **phase 1 built** (a phone has paired; a phone question through ClaudeIn not yet confirmed) and
-**phase 2 built**; **phase 3's client library built** (the Village move waits for Village's project). Written
-2026-11-15. Every phase below needs its own "approve" before any code is
+**phase 2 built**; **phase 3's client library built** (the Village move waits for Village's project); **phase 5a built**
+(2026-11-18: sign in with Claude from inside ClaudeIn, finding the Claude Code installed on the PC, and the guard against
+Claude Code updates; section 4.9) and **phase 5b built** (2026-11-18: `ClaudeIn-Setup.exe`, see phase 5b below). Written 2026-11-15. Every phase below needs its own "approve" before any code is
 written (see `CLAUDE.md`).
 
 ## 1. What ClaudeIn is, in plain words
 
 ClaudeIn is one small program that sits in the Windows tray (the hidden icons by the clock) and lets the owner's apps use
-Claude through the Claude Code login already on this PC. No API keys anywhere.
+Claude through the Claude Code installed on this PC, signed in (from ClaudeIn, in the browser) with the Claude account the
+owner chooses. No API keys anywhere.
 
 - The two Signal Lab phone apps (crypto and EGX) talk to it over the home Wi-Fi, or over Tailscale when away from home.
 - Programs on this PC (Village first, future apps later) talk to it directly on the PC.
@@ -154,10 +156,10 @@ the address gets `:8790` on the end, which means re-pairing once.
 ### 4.4 Runner
 
 - Claude Code is run through the **Claude Agent SDK for Python**. That is the same library Village already uses
-  successfully with the Claude login on this PC. The SDK comes with its **own copy of Claude Code** (`claude.exe`
-  inside the SDK), not the `claude` the owner types in a terminal. It uses the same Claude login. Its version can differ
-  from the owner's own, so the tray panel and the Home page show the version ClaudeIn uses. It updates when ClaudeIn's
-  add-ons are updated (running `Setup-ClaudeIn.bat` again). It gives us:
+  successfully. **Change (owner, 2026-11-18):** ClaudeIn does **not** use the SDK's bundled copy of Claude Code. It runs
+  the **Claude Code installed separately on the PC** (the SDK is pointed at it with `cli_path`), so ClaudeIn can be
+  installed on any computer without carrying a 355 MB copy. Finding it, signing in and guarding against its updates are
+  in section 4.9. The tray panel and the Home page show the version in use. The SDK gives us:
   - the **tool bridge in-process** (`create_sdk_mcp_server`): a tool call waits for the phone's or program's answer,
     with no separate HTTP bridge server to keep safe
   - streaming text (`include_partial_messages`)
@@ -172,7 +174,8 @@ the address gets `:8790` on the end, which means re-pairing once.
   - `strict_mcp_config`
   - no saved session
   - `max_budget_usd` and `max_turns` from the request
-  - `ANTHROPIC_API_KEY` blanked, so the Claude login is always used
+  - `ANTHROPIC_API_KEY` blanked (and `ANTHROPIC_AUTH_TOKEN` and the Bedrock/Vertex/Foundry switches, which this PC
+    may have set), so the Claude login is always used
   - run in an empty temporary folder
 
   If an SDK option for one of the Kotlin flags (`--restricted`) is missing, it is passed as an extra command-line flag.
@@ -259,7 +262,10 @@ Pair    Usage    Settings
 **Right-click: a short menu**, also frosted glass: Open ClaudeIn, Pause all, Quit.
 
 **Settings window**, frosted glass, with a side menu:
-- **Home:** status, plan use, runs working and waiting.
+- **Home:** status, plan use, runs working and waiting, and a "Set up Claude…" button while Claude Code or the sign-in
+  is missing.
+- **Claude** (phase 5a): Claude Code on this PC, the Claude account (sign in, switch, sign out), "Its own Claude login",
+  the Claude Code versions ClaudeIn has seen, and the Advanced known-good copy (4.9).
 - **Devices:** one card per pairing (Signal Lab — Phone, Signal Lab EGX — Phone, Village (this PC)), each with an
   on/off switch and Forget…, plus "Pair a device". Each app also has its list of allowed models (4.3).
 - **Usage:** the usage view from 4.5.
@@ -287,8 +293,11 @@ only) as one file wherever the owner picks. "Restore pairings" puts them back, s
 mean pairing every phone again. The file lets someone pretend to be ClaudeIn to the phones, so the window says to keep
 it somewhere private.
 
-- "Signed in ✓" comes from the last run that worked or from "Check Claude Code". ClaudeIn never sends a question on its
-  own at start, so it uses no plan time just by running.
+- "Signed in as <email> (<plan>) ✓" comes from Claude Code's own `claude auth status`, looked at when ClaudeIn starts,
+  every 15 minutes, and after a sign-in, a sign-out or a run that says it is signed out. It is free: ClaudeIn never sends
+  a question on its own, so it uses no plan time just by running. "Check Claude Code" (one tiny Haiku question) stays.
+- **Claude page** in the settings window (phase 5a, section 4.9): step 1 Claude Code, step 2 the Claude account, then the
+  versions ClaudeIn has seen and an Advanced known-good copy. The panel shows a "Sign in with Claude" button when needed.
 - The panel and windows are real desktop windows made with **PySide6 and PySide6-Fluent-Widgets**. They are not web
   pages, so there is no extra page that other programs on the PC could reach. PySide6's own tray icon is used.
 - PySide6-Fluent-Widgets is free for personal use (GPL licence). That's fine because ClaudeIn stays on this PC and is
@@ -320,11 +329,72 @@ ClaudeIn\
                        Python 3.14), PySide6-Fluent-Widgets, qasync, Pillow, qrcode
   claudein\            the service: config, tls, netguard, pairing, server, queue, runner, usage, tray, windows
   client\claudein_client\   the small Python client library (phase 3)
+  packaging\           launch.py, ClaudeIn.spec (PyInstaller), ClaudeIn.iss (Inno Setup), make_icon.py, build.py (phase 5b)
+  Build-Installer.bat  makes build\installer\ClaudeIn-Setup-<version>.exe (needs Inno Setup 6)
+  requirements-build.txt   pyinstaller
   tests\
 %USERPROFILE%\.claudein\   settings.json, cert.pem/key.pem, devices.json (hashed codes), local.json (token),
                            usage.db, logs\
 ```
 "Start with Windows" puts or removes a shortcut in the owner's own Startup folder. It needs no admin rights.
+
+Phase 5a adds to `%USERPROFILE%\.claudein\`: `claude\` (ClaudeIn's own Claude login, when "Its own Claude login" is on),
+`claude-versions.json` (the versions seen, no secrets) and, only if the owner asks for it, `claude-code\<version>\`
+(ClaudeIn's own copy of Claude Code). `settings.json` gains `own_login` (default true) and `claude_copy` ("pc" or "own").
+
+### 4.9 Claude Code on the PC: finding it, signing in, and surviving its updates (phase 5a)
+
+**Decisions (owner, 2026-11-18):** ClaudeIn must be installable on any computer and sign in with the Claude account the
+owner picks, by the normal Claude browser sign-in. Claude Code is **installed separately** (not bundled). A Claude Code
+update must never crash ClaudeIn.
+
+**Finding it** (`claudein\claudecode.py`). In order: an absolute PATH folder with `claude.exe`, then
+`%USERPROFILE%\.local\bin\claude.exe`; or ClaudeIn's own copy when `claude_copy` is "own". npm's `claude.cmd` shim is
+recognised and refused (the SDK refuses it too) with a message saying to install the standard one. Nothing is
+downloaded or installed unless the owner clicks a button for it.
+
+**First run.** If Claude Code is missing or signed out when ClaudeIn starts, the Claude page opens by itself:
+1. *Claude Code:* "Open download page" (the official setup page) and "Check again". ClaudeIn never runs an installer
+   for the owner.
+2. *Claude account:* "Sign in with Claude" runs `claude auth login --claudeai` with no window. Claude opens the normal
+   browser sign-in; ClaudeIn waits (5 minutes at most), shows "Open the page again", "Copy link" (Anthropic's own
+   addresses only) and "Cancel", then reads `auth status`. "Switch account" signs out and in again; "Sign out" runs
+   `auth logout`. Only a **Claude plan** sign-in is accepted. A Console (API billing) sign-in is refused, so nothing is
+   ever billed by use.
+
+**Its own login.** By default ClaudeIn keeps its own login in `.claudein\claude` (`CLAUDE_CONFIG_DIR`), so it can use a
+different account from the one used in a terminal. A switch turns that off to use the PC's Claude Code login instead.
+
+**The guard** (so an update can't crash ClaudeIn):
+- *A free check:* `--version`, `--help` and `auth status`, no question and no plan time. It is remembered by the program
+  file's size and date and runs again only when the file changes (before each run, which costs one file lookup).
+- *Needed flags:* `--restricted`, `--tools`, `--allowedTools`, `--permission-mode`, `--setting-sources`,
+  `--strict-mcp-config`, `--mcp-config`, `--output-format`, `--input-format`, `--verbose`, `--model`. If one is gone, runs
+  end at once with "Claude Code <version> isn't compatible with ClaudeIn yet: it doesn't have <flag>…" and
+  `error_kind: "unavailable"`; Claude Code is not started and the lock-down is never loosened. An older version than
+  2.1.296 (the oldest tried) is refused the same way ("too old").
+- *Flags that can be left out:* `--no-session-persistence`, `--include-partial-messages`, `--max-budget-usd` are left
+  out, and the Claude page says so.
+- *Unreadable messages are skipped,* counted and logged by type only, instead of ending the run (the SDK already skips
+  types it doesn't know).
+- *One retry:* if Claude Code stops without an answer before anything reached the caller (no text, no tool call), the
+  question is asked once more. After text or a tool call there is no retry, so nothing is repeated.
+- *Counting:* each run counts as good (Claude Code spoke in its own words, even an error) or bad (it stopped without an
+  answer). Two bad runs in a row mark the version "not working" in the tray and Home; a good run clears it.
+- *No updates in the middle of a run:* ClaudeIn starts Claude Code with `DISABLE_AUTOUPDATER=1`.
+- *Versions seen* (`claude-versions.json`): per version, the check result, the flags it lacked, and good and bad runs, shown
+  on the Claude page. The service never stops being up: problems show in the tray and in the apps as "PC not available"
+  style failures, not as crashes.
+
+**The safety net** (Advanced, on the owner's click only). "Download <known-good>" fetches that Claude Code from
+Anthropic's release site (`downloads.claude.ai/claude-code-releases`), checks it against the release manifest's SHA-256
+and Windows' Authenticode signature ("Anthropic, PBC"), keeps it in `.claudein\claude-code\<version>\` (one copy only),
+and uses it from then on with `DISABLE_UPDATES=1` so it never changes. "Use the one on this PC" switches back. The
+known-good version is 2.1.325, the one ClaudeIn was built and tested with. The manifest's own GPG signature is not
+checked (it needs gpg); the Windows signature covers authenticity.
+
+**The limit.** A future update could change something the check can't see (for example a hidden flag), and ClaudeIn would
+only learn it when runs fail. The owner then gets a clear message and the safety-net button, not a crash.
 
 ## 5. Phases (each approved on its own)
 
@@ -383,6 +453,34 @@ question starts). Waiting on the owner's hand check 8.
 - **Plain advice:** pair the phone with the **Tailscale address**. It works at home and away, so the phone needs only
   one address. No port is opened on the router, and Tailscale Funnel stays off.
 
+### Phase 5a: sign-in, Claude Code on the PC, the guard (built 2026-11-18)
+Section 4.9 and its Claude page, panel button and first-run screen. **Done when:** on a PC with Claude Code installed and
+no ClaudeIn login, the owner presses Sign in with Claude, finishes the browser page, and the next question works with
+that account's plan; and a Claude Code update that removes a needed flag is refused with a clear message while ClaudeIn
+keeps running. The real chain was checked with the installed Claude Code 2.1.296 (live test, PC login).
+
+### Phase 5b: one installable program (built 2026-11-18)
+`Build-Installer.bat` (or `.venv\Scripts\python.exe packaging\build.py`) makes `build\installer\ClaudeIn-Setup-<version>.exe`
+for any Windows PC: a PyInstaller folder build **without** the SDK's bundled `claude.exe` (the build fails if one gets in),
+wrapped by Inno Setup 6 (`packaging\ClaudeIn.iss`).
+- **Size:** the installer is about 57 MB; installed, ClaudeIn is about 171 MB.
+- **Installs for the current user only:** no administrator rights, no UAC question. Two ticks, both on by default: add to
+  the Start menu, and start with Windows (the Startup shortcut, plus the restart task that `ClaudeIn.exe --setup` adds).
+  It offers to start ClaudeIn when it finishes.
+- **Updating:** installing a newer one over an old one first stops a running `ClaudeIn.exe` (and sets the quit flag so the
+  restart task doesn't bring it back mid-update; the next normal start clears it).
+- **Uninstalling** runs `ClaudeIn.exe --remove-startup` and stops ClaudeIn. It removes the Startup shortcut and restart task
+  **only if they start the installed program**, so a ClaudeIn run from `.venv` keeps its own. The `.claudein` folder
+  (pairings, certificate, ClaudeIn's Claude login, usage) is **kept**; delete it by hand to remove everything.
+- **First start on a new computer** opens the Claude page: install Claude Code (step 1), then Sign in with Claude (step 2).
+- `autostart.py` and the restart after Restore start `ClaudeIn.exe` (no `-m claudein`) when installed; from `.venv` nothing
+  changes. An early failure before logging starts is written to `.claudein\startup-error.txt`.
+- **Not done here:** the firewall rule (it stays in phase 4), and code-signing. Windows SmartScreen will warn ("unknown
+  publisher") on other computers until the installer is signed, which needs a paid certificate; "More info, Run anyway"
+  works. Tailscale is still needed on a computer whose phones connect from away.
+- **Checked:** a real silent install into a temporary folder, the installed program answering `/hello` and finding Claude
+  Code, and a silent uninstall, with the real shortcuts, task and running ClaudeIn untouched.
+
 ## 6. Later changes in the Signal Lab apps (belong to `signal-lab-egx`, need their own approval there)
 
 1. The default port becomes 8790 (`HostClient.PORT`, `EgxHost` `PORT`), so the owner can type the address without
@@ -424,10 +522,20 @@ question starts). Waiting on the owner's hand check 8.
   - Backup then restore brings back the same certificate and pairings.
   - The loopback token is refused on the network port.
   - Endings and `done` fields match the Kotlin host's for the same recorded stream.
-- **A live test, off by default:** one tiny Haiku question through the real Claude Code, run on purpose.
+  - **Phase 5a (a fake `claude` program):** missing, broken, too old and incompatible Claude Code refuse runs without
+    starting it; optional flags are left out and the lock-down stays; the check is remembered until the file changes; an
+    update that removes a flag is refused and then recovers; signed out and Console accounts are refused; an expired
+    login shows up by itself; sign-in, cancel, failure, time-out and sign-out; no email or link in logs or files; one
+    retry only when nothing reached the caller; "not working" after two bad runs and recovery; unreadable messages
+    skipped; the own-copy download (good, wrong checksum, wrong signature, unreachable); finding the program (PATH,
+    relative folders, npm shim, newest own copy); the Claude page in each state.
+- **A live test, off by default:** one tiny Haiku question through the real Claude Code, run on purpose
+  (`CLAUDEIN_LIVE=1`, plus `CLAUDEIN_LIVE_PC_LOGIN=1` to use the PC's Claude Code login instead of ClaudeIn's own).
 
 **By hand (the owner):**
-1. Run `Setup-ClaudeIn.bat` once. The ClaudeIn icon appears in the hidden icons.
+1. Run `Setup-ClaudeIn.bat` once. The ClaudeIn icon appears in the hidden icons, and the Claude page opens by itself.
+   Press **Sign in with Claude** (step 2), finish the browser page, and the page says "Signed in as <you> (<plan>)".
+   (Phase 5a.) Then pressing Sign out, and Sign in again with another account, switches the account.
 2. The icon is still there after a restart of the PC ("Start with Windows").
    - Drag the glass test window around: it moves smoothly (phase 1, first step).
    - While a question runs, no black console window appears.
@@ -450,6 +558,11 @@ question starts). Waiting on the owner's hand check 8.
 6. **PC sleep:** ClaudeIn keeps the PC awake only while a run is going or waiting, with an optional "Keep PC awake"
    switch, off by default (see 4.4).
 7. **Models:** each app may have a list of allowed models, empty (any model) by default (see 4.3).
+8. **(2026-11-18) Installable on any computer, signing in with the chosen Claude account by the browser.** Claude Code is
+   **installed separately**, not bundled (see 4.4 and 4.9). ClaudeIn must **never crash because Claude Code updated**:
+   a free check, refusal with a clear message, one retry, and a known-good copy the owner can choose to download.
+   ClaudeIn keeps **its own Claude login** by default (separate from the terminal's). One phase at a time: 5a
+   (sign-in and guard) first, 5b (installer) after.
 
 Decided here without asking (can be changed): port 8790/8791; `/hello` keeps the old name for now; 2 runs at once;
 10 minutes at most in line; 20 can wait; runs stop after 15 minutes; logs are kept 14 days.

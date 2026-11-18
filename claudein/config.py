@@ -39,10 +39,14 @@ class Settings:
     run_limit_min: float = 15  # longest a run may last
     keep_awake: bool = False  # keep the PC awake all the time, not only while busy
     paused: bool = False
+    own_login: bool = True  # ClaudeIn keeps its own Claude login (.claudein\claude), apart from the terminal's
+    claude_copy: str = "pc"  # "pc": the Claude Code installed on this PC; "own": the copy ClaudeIn downloaded for itself
 
     def clamp(self) -> "Settings":
         self.workers = max(1, min(4, int(self.workers)))
         self.max_waiting = max(0, int(self.max_waiting))
+        if self.claude_copy not in ("pc", "own"):
+            self.claude_copy = "pc"
         return self
 
     @classmethod

@@ -5,6 +5,7 @@ The tray (Part B) drives this; for now `python -m claudein.engine` runs it on it
 
 from __future__ import annotations
 
+import asyncio
 import ipaddress
 import logging
 import socket
@@ -14,17 +15,20 @@ from typing import Callable
 from aiohttp import web
 
 from . import config, tls
+from .claudecode import ClaudeCode
 from .pairing import Device, LocalToken, Pairings, WrongCodeGuard
-from .runner import QueryFn, Runner, bundled_claude_version
+from .runner import QueryFn, Runner
 from .runs import Run
 from .scheduler import Scheduler
 from .server import Server
 from .usage import Usage, log_run, setup_logs
 
+CLAUDE_RECHECK_S = 15 * 60  # how often Claude Code and the account are looked at again (free, no question)
+
 
 class Service:
     def __init__(self, folder: Path | None = None, query_fn: QueryFn | None = None,
-                 on_change: Callable[[], None] | None = None):
+                 on_change: Callable[[], None] | None = None, claude: ClaudeCode | None = None):
         self.folder = folder or config.home()
         self.settings = config.Settings.load(self.folder)
         self.log = setup_logs(self.folder)
@@ -35,8 +39,10 @@ class Service:
         self.token = LocalToken(self.folder, self.settings.local_port)
         self.usage = Usage(self.folder / "usage.db")
         self.guard = WrongCodeGuard()
-        self.runner = Runner(query_fn)
-        self.claude_version = bundled_claude_version()
+        self.claude = claude or ClaudeCode(self.folder)
+        self.claude.attach(self.settings, self.changed)
+        self.runner = Runner(query_fn, claude=self.claude)
+        self._claude_watch: asyncio.Task | None = None
         self.runs: dict[str, Run] = {}
         self.scheduler = Scheduler(self.settings, self.runner.execute, on_finished=self.run_finished,
                                    on_change=self.changed, over_cap=self.over_cap)
@@ -55,6 +61,10 @@ class Service:
             self.start_problems.append(f"A port ClaudeIn needs ({self.settings.phone_port} or "
                                        f"{self.settings.local_port}) is used by another program.")
             self.changed()
+
+    @property
+    def claude_version(self) -> str | None:
+        return self.claude.version
 
     def changed(self) -> None:
         try:
@@ -78,6 +88,9 @@ class Service:
 
     async def start(self, use_tls: bool = True, phone_port: int | None = None, local_port: int | None = None) -> None:
         """Starts listening. Port 0 picks a free port (tests). Raises OSError if a port is in use."""
+        await self.claude.refresh()  # free: no question is asked; first, so a busy port can't skip it
+        if self._claude_watch is None:
+            self._claude_watch = asyncio.create_task(self._watch_claude())
         pport = self.settings.phone_port if phone_port is None else phone_port
         lport = self.settings.local_port if local_port is None else local_port
         ctx = tls.server_context(self.folder) if use_tls else None
@@ -102,10 +115,19 @@ class Service:
         if self.local_port != self.token.port:
             self.token.port = self.local_port
             self.token.write(self.token.token)
-        self.log.info("ClaudeIn %s started: phones on %s, programs on 127.0.0.1:%s, Claude Code %s",
-                      config.VERSION, self.phone_port, self.local_port, self.claude_version)
+        self.log.info("ClaudeIn %s started: phones on %s, programs on 127.0.0.1:%s, Claude Code %s (%s)",
+                      config.VERSION, self.phone_port, self.local_port, self.claude_version, self.claude.state)
+
+    async def _watch_claude(self) -> None:
+        """Looks at Claude Code and the account again now and then, so an update or an expired login shows up."""
+        while True:
+            await asyncio.sleep(CLAUDE_RECHECK_S)
+            await self.claude.refresh()
 
     async def stop(self) -> None:
+        if self._claude_watch is not None:
+            self._claude_watch.cancel()
+        self.claude.cancel_sign_in()
         await self.scheduler.shutdown()
         for r in self._runners:
             await r.cleanup()
@@ -134,19 +156,20 @@ class Service:
             "signed_in": self.signed_in(),
             "plan": self.plan_use(),
             "problems": self.problems(),
+            "claude": self.claude_summary(),
         }
 
     def signed_in(self) -> bool | None:
-        """True after a run that worked (this session or before), False when Claude Code said it is signed out,
-        None when nothing has run yet. ClaudeIn never asks a question on its own to find out."""
-        if self.runner.signed_in is not None:
-            return self.runner.signed_in
-        row = self.usage.db.execute(
-            "SELECT ending, error_kind FROM runs WHERE ending != 'stopped' AND (error_kind IS NULL OR error_kind"
-            " NOT IN ('paused','cap','not_allowed')) ORDER BY asked_at DESC LIMIT 1").fetchone()
-        if row is None:
-            return None
-        return row[1] != "unavailable" if row[0] == "failed" else True
+        """From Claude Code's own `auth status` (free), and corrected by runs: True after one that worked, False when
+        Claude Code said it is signed out, None when it can't be told."""
+        return self.claude.signed_in
+
+    def claude_summary(self) -> dict:
+        c = self.claude
+        return {"state": c.state, "version": c.version, "path": str(c.path) if c.path else None,
+                "email": c.account.email if c.account else None, "plan": c.account.plan if c.account else None,
+                "own_login": self.settings.own_login, "copy": self.settings.claude_copy, "suspect": c.suspect,
+                "needs_setup": c.needs_setup(), "login": c.login.state, "install": c.install.state}
 
     def plan_use(self) -> dict | None:
         """The plan's 5-hour and 7-day use (0-1) Claude Code last reported, for the whole plan."""
@@ -161,12 +184,33 @@ class Service:
         return {"five_hour": last["five_hour"], "seven_day": last["seven_day"], "resets_at": None} if last else None
 
     def problems(self) -> list[str]:
-        out = list(self.start_problems)
-        if not self.claude_version:
-            out.append("Claude Code is missing. Run Setup-ClaudeIn.bat again.")
-        if self.signed_in() is False:
-            out.append("Claude Code is signed out. Open a terminal, run claude, and sign in.")
-        return out
+        return list(self.start_problems) + self.claude.problems()
+
+    # --- Claude Code and the account (the Claude page and the panel call these) ----------------------------------------
+
+    async def recheck_claude(self) -> None:
+        await self.claude.refresh()
+
+    async def sign_in(self) -> bool:
+        return await self.claude.sign_in()
+
+    def cancel_sign_in(self) -> None:
+        self.claude.cancel_sign_in()
+
+    async def sign_out(self) -> None:
+        await self.claude.sign_out()
+
+    async def set_own_login(self, on: bool) -> None:
+        """Own login: ClaudeIn keeps its Claude login apart from the terminal's. Off: it uses this PC's Claude Code login."""
+        self.settings.own_login = on
+        self.settings.save(self.folder)
+        await self.claude.refresh()
+
+    async def install_claude_copy(self) -> bool:
+        return await self.claude.install_own_copy()
+
+    async def use_installed_claude(self) -> None:
+        await self.claude.use_installed_copy()
 
     async def check_claude(self) -> dict:
         """'Check Claude Code': one tiny Haiku question, through the queue like any other. Only on the owner's click."""

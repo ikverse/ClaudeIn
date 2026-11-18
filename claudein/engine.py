@@ -33,7 +33,7 @@ async def _run() -> None:
     await svc.start()
     print(f"ClaudeIn engine running. Phones: port {svc.phone_port}. Programs: 127.0.0.1:{svc.local_port}.")
     print("Addresses:", ", ".join(lan_addresses()) or "?", "· certificate ends with", tls.short_fingerprint(svc.folder))
-    print("Claude Code (bundled):", svc.claude_version, "· Ctrl+C to stop.")
+    print("Claude Code:", svc.claude_version, f"({svc.claude.state})", "· Ctrl+C to stop.")
     try:
         await asyncio.Event().wait()
     finally:

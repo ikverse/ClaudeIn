@@ -1,8 +1,10 @@
 # ClaudeIn
 
 ClaudeIn is a tray program on the owner's Windows PC. It lets the owner's apps (Signal Lab crypto and Signal Lab EGX on
-Android, Village in `..\PlatformExperimental`, and future apps) use Claude through the Claude Code login on this PC, with
-no API keys. The full plan is in `docs/plan.md`. Started 2026-11-15. **Nothing is built yet.**
+Android, Village in `..\PlatformExperimental`, and future apps) use Claude through Claude Code, signed in with the
+Claude account the owner picks (browser sign-in inside ClaudeIn), with no API keys. The full plan is in `docs/plan.md`.
+Started 2026-11-15. Phases 1, 2, 3 (client library), 5a (sign-in, finding Claude Code, the update guard) and 5b
+(`ClaudeIn-Setup.exe`, built with `Build-Installer.bat`) are built. Phase 4 (away from home, the firewall rule) is not.
 
 ## Working rules
 
@@ -29,6 +31,10 @@ no API keys. The full plan is in `docs/plan.md`. Started 2026-11-15. **Nothing i
 8. This folder is its own project.
 9. Caps count share of the plan's limit ("plan points", 100 = one full 5-hour window, estimated per app).
 10. Phone questions go ahead of waiting program runs. Village's `demo_run.py` keeps calling Claude Code directly.
+11. (2026-11-18) ClaudeIn must be installable on any computer and sign in with the Claude account the owner picks, by the
+    normal Claude browser sign-in. **Claude Code is installed separately, not bundled.** ClaudeIn keeps its own login by
+    default. It must never crash because Claude Code updated (the guard, `docs/plan.md` 4.9). Phase 5a first, then 5b
+    (the installer), each approved on its own.
 
 ## Fixed technical choices (from the plan)
 
@@ -38,5 +44,9 @@ no API keys. The full plan is in `docs/plan.md`. Started 2026-11-15. **Nothing i
   address. `/hello` keeps answering `"app": "Signal Lab analyst host"` until both apps accept `"ClaudeIn"`.
 - Each pairing has its own code (one app on one device). Codes are stored only as hashes and can be revoked one by one.
 - Claude Code runs through the Claude Agent SDK, locked down as the Kotlin host does it, with `ANTHROPIC_API_KEY`
-  blanked.
-- Logs and usage records never hold codes, tokens, prompts, answers or tool data.
+  blanked. It runs the **separately installed** Claude Code (`cli_path`), never the SDK's bundled copy. Only a Claude
+  **plan** sign-in is accepted (a Console / API-billing sign-in is refused). The lock-down flags are never dropped; if
+  Claude Code lacks one, runs are refused. Downloads (the optional known-good copy) happen only on the owner's click and
+  are checked against Anthropic's checksum and signature.
+- Logs and usage records never hold codes, tokens, prompts, answers or tool data. They also never hold the Claude
+  sign-in link or the account's email.

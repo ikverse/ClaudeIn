@@ -144,7 +144,7 @@ types they don't know.
 | `paused` | the owner paused ClaudeIn | say the PC is paused |
 | `cap` | today's cap for this app is used up (phase 2) | wait until midnight |
 | `not_allowed` | the owner hasn't allowed this app to use that model | use another model |
-| `unavailable` | Claude Code can't run (missing or signed out), the line was full, or the run waited too long | say the PC is not available |
+| `unavailable` | Claude Code can't run (not installed, won't start, too old, not compatible with ClaudeIn yet, or signed out), the line was full, or the run waited too long. The ending says which, in words for the owner | say the PC is not available |
 
 **ClaudeIn's own refusals** are normal `done` events, so phones show them unchanged:
 - `failed: ClaudeIn is paused on the PC.`
