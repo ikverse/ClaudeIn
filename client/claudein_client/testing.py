@@ -3,7 +3,9 @@
     fake = FakeClaudeIn()
     fake.reply("Hello")                                       # a plain answer
     fake.reply("Done", tools=[("get_notes", {"day": 3})])     # calls the program's tool first, then answers
+    fake.reply('{"up": true}', structured={"up": True})  # an answer in the shape output_schema asked for
     fake.fail("rate_limited", "Claude plan limit reached; it resets at 14:00.")
+    fake.fail("format", "Claude didn't answer in the requested shape.")
     fake.unavailable()                                        # the next run raises ClaudeInUnavailable
 
     result = await fake.ask(app="village", model=..., system=..., prompt=..., tools=[...])
@@ -17,9 +19,9 @@ it would pass the real ones (like Village's query_fn hook today). Unscripted run
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from typing import AsyncIterator
+from typing import Any, AsyncIterator
 
-from ._client import (ClaudeInUnavailable, Done, Event, Result, Started, Text, Tool, ToolCall, call_handler)
+from ._client import (ClaudeInUnavailable, Done, Event, Image, Result, Started, Text, Tool, ToolCall, call_handler)
 
 
 @dataclass
@@ -31,6 +33,7 @@ class _Script:
     unavailable: bool = False
     usage: dict = field(default_factory=lambda: {"input": 10, "output": 5, "cache_read": 0, "cache_write": 0})
     limits: dict | None = None
+    structured: Any = None
 
 
 class FakeClaudeIn:
@@ -42,8 +45,8 @@ class FakeClaudeIn:
     # --- scripting -----------------------------------------------------------------------------------------------
 
     def reply(self, text: str, tools: list[tuple[str, dict]] | None = None, ending: str = "done",
-              usage: dict | None = None, limits: dict | None = None) -> "FakeClaudeIn":
-        s = _Script(text=text, tools=list(tools or []), ending=ending, limits=limits)
+              usage: dict | None = None, limits: dict | None = None, structured: Any = None) -> "FakeClaudeIn":
+        s = _Script(text=text, tools=list(tools or []), ending=ending, limits=limits, structured=structured)
         if usage is not None:
             s.usage = usage
         self._queue.append(s)
@@ -63,14 +66,16 @@ class FakeClaudeIn:
     async def run(self, *, app: str, model: str, system: str, prompt: str, history: list[dict] | None = None,
                   tools: list[Tool] | None = None, builtin_tools: list[str] | None = None,
                   max_turns: int | None = None, max_budget_usd: float | None = None,
-                  tool_timeout_s: float | None = None) -> AsyncIterator[Event]:
+                  tool_timeout_s: float | None = None, images: list[Image] | None = None,
+                  output_schema: dict | None = None) -> AsyncIterator[Event]:
         s = self._queue.pop(0) if self._queue else _Script()
         if s.unavailable:
             raise ClaudeInUnavailable("PC not available: ClaudeIn isn't running.")
         self.calls.append({"app": app, "model": model, "system": system, "prompt": prompt, "history": history,
                            "tools": [t.name for t in tools or []], "builtin_tools": builtin_tools,
                            "max_turns": max_turns, "max_budget_usd": max_budget_usd,
-                           "tool_timeout_s": tool_timeout_s})
+                           "tool_timeout_s": tool_timeout_s, "images": list(images or []),
+                           "output_schema": output_schema})
         by_name = {t.name: t for t in tools or []}
         yield Started(f"fake-{len(self.calls)}")
         messages: list[str] = []
@@ -82,7 +87,8 @@ class FakeClaudeIn:
             yield Text(s.text)
             messages.append(s.text)
         yield Done(Result(ending=s.ending, answer=s.text, messages=messages, usage=dict(s.usage),
-                          api_price_usd=0.0, turns=len(s.tools) + 1, limits=s.limits, error_kind=s.error_kind))
+                          api_price_usd=0.0, turns=len(s.tools) + 1, limits=s.limits, error_kind=s.error_kind,
+                          structured=s.structured if s.ending == "done" else None))
 
     async def ask(self, **kwargs) -> Result:
         async for e in self.run(**kwargs):

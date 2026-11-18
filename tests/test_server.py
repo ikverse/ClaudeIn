@@ -18,7 +18,7 @@ async def test_hello_stays_compatible(svc, phone):
     status, body = await phone.get("/hello", auth=None)
     assert status == 200
     assert body["app"] == HELLO_APP == "Signal Lab analyst host"
-    assert body["protocol"] == 1
+    assert body["protocol"] == 2  # no phone app reads this number
     assert body["service"] == "ClaudeIn"
 
 
@@ -150,7 +150,7 @@ async def test_two_at_once_third_waits(svc, phone, fake):
     await until(lambda: bool(waits))
     assert waits[0] == "Waiting for the PC (0 ahead)…"
     status, check = await phone.get("/check")
-    assert check == {"ok": True, "busy": False, "queue": 1}
+    assert check == {"ok": True, "busy": False, "queue": 1, "features": ["images", "output_schema"]}
     fake.gate.set()
     results = await asyncio.gather(*tasks, third)
     assert all(r[-1]["ending"] == "done" for r in results)

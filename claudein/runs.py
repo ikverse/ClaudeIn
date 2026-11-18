@@ -3,6 +3,9 @@
 from __future__ import annotations
 
 import asyncio
+import base64
+import binascii
+import json
 import re
 import time
 import uuid
@@ -11,6 +14,14 @@ from typing import Any, Callable
 
 DEFAULT_BUILTIN_TOOLS = ["WebSearch", "WebFetch"]
 KNOWN_BUILTIN_TOOLS = {"WebSearch", "WebFetch"}  # never shell, files or code: plan 4.4 and 4.7
+
+MAX_IMAGES = 20
+MAX_IMAGE_BYTES = 5 * 1024 * 1024  # each picture, once decoded
+#: The schema goes to Claude Code on its command line, and Windows caps a command line at about 32,000 characters.
+MAX_SCHEMA_BYTES = 16 * 1024
+_IMAGE_TYPES = {"image/png": "png", "image/jpeg": "jpeg", "image/jpg": "jpeg", "image/webp": "webp",
+                "image/gif": "gif"}
+_WHITESPACE = re.compile(r"\s+")
 
 
 class BadRequest(ValueError):
@@ -31,6 +42,69 @@ class ToolDef:
 
 
 @dataclass
+class Picture:
+    """A picture in the question: base64 text (no spaces or line breaks) and its type."""
+
+    data: str
+    mime_type: str
+
+
+def _kind_of(raw: bytes) -> str | None:
+    """What the picture's first bytes say it is."""
+    if raw.startswith(b"\x89PNG\r\n\x1a\n"):
+        return "png"
+    if raw.startswith(b"\xff\xd8\xff"):
+        return "jpeg"
+    if raw[:6] in (b"GIF87a", b"GIF89a"):
+        return "gif"
+    if raw[:4] == b"RIFF" and raw[8:12] == b"WEBP":
+        return "webp"
+    return None
+
+
+def _pictures(v: Any) -> list[Picture]:
+    if v is None:
+        return []
+    if not isinstance(v, list):
+        raise BadRequest('"images" must be a list of pictures.')
+    if len(v) > MAX_IMAGES:
+        raise BadRequest(f"Too many pictures: at most {MAX_IMAGES}.")
+    out = []
+    for i, p in enumerate(v, 1):
+        if not isinstance(p, dict) or not isinstance(p.get("data"), str):
+            raise BadRequest(f'Picture {i} needs "data" (base64) and "mime_type".')
+        mime = str(p.get("mime_type") or "").strip().lower()
+        kind = _IMAGE_TYPES.get(mime)
+        if kind is None:
+            raise BadRequest(f"Picture {i}: the type must be PNG, JPEG, WebP or GIF.")
+        data = _WHITESPACE.sub("", p["data"])  # some phones break base64 into lines
+        if len(data) > (MAX_IMAGE_BYTES // 3 + 1) * 4:
+            raise BadRequest(f"Picture {i} is larger than 5 MB.")
+        try:
+            raw = base64.b64decode(data, validate=True)
+        except (binascii.Error, ValueError):
+            raise BadRequest(f"Picture {i} is not valid base64.") from None
+        if not raw:
+            raise BadRequest(f"Picture {i} is empty.")
+        if len(raw) > MAX_IMAGE_BYTES:
+            raise BadRequest(f"Picture {i} is larger than 5 MB.")
+        if _kind_of(raw) != kind:
+            raise BadRequest(f"Picture {i} is not a {kind.upper()} picture.")
+        out.append(Picture(data, "image/jpeg" if kind == "jpeg" else mime))
+    return out
+
+
+def _schema(v: Any) -> dict | None:
+    if v is None:
+        return None
+    if not isinstance(v, dict) or v.get("type") != "object":
+        raise BadRequest('"output_schema" must be a JSON Schema whose "type" is "object".')
+    if len(json.dumps(v, ensure_ascii=False, separators=(",", ":")).encode("utf-8")) > MAX_SCHEMA_BYTES:
+        raise BadRequest("output_schema is too long: at most 16 KB.")
+    return v
+
+
+@dataclass
 class RunSpec:
     model: str
     system: str
@@ -42,6 +116,8 @@ class RunSpec:
     max_turns: int | None = None
     tool_timeout_s: float = 60.0
     app: str | None = None  # optional "app" from the request
+    images: list[Picture] = field(default_factory=list)  # pictures in the question (protocol 2)
+    output_schema: dict | None = None  # the shape the answer must have (protocol 2)
 
     @classmethod
     def parse(cls, o: Any) -> "RunSpec":
@@ -99,6 +175,8 @@ class RunSpec:
             max_turns=max_turns,
             tool_timeout_s=max(5.0, min(600.0, _number(o.get("tool_timeout_s"), 60.0))),
             app=app.strip() if isinstance(app, str) else None,
+            images=_pictures(o.get("images")),
+            output_schema=_schema(o.get("output_schema")),
         )
 
 
@@ -127,8 +205,9 @@ def working_for_tool(tool: str) -> dict | None:
 
 
 def done(ending: str, answer: str = "", usage: dict | None = None, cost: float | None = None, turns: int = 0,
-         limits: dict | None = None, error_kind: str | None = None) -> dict:
-    """The last event. [usage] is Claude Code's raw usage; [limits] its raw rate_limit_info."""
+         limits: dict | None = None, error_kind: str | None = None, structured: Any = None) -> dict:
+    """The last event. [usage] is Claude Code's raw usage; [limits] its raw rate_limit_info; [structured] the answer
+    in the requested shape (sent only when there is one)."""
     u: dict[str, int] = {}
     if usage:
         u = {
@@ -154,6 +233,8 @@ def done(ending: str, answer: str = "", usage: dict | None = None, cost: float |
         o["limits"] = lim
     if error_kind:
         o["error_kind"] = error_kind
+    if structured is not None:
+        o["structured"] = structured
     return o
 
 

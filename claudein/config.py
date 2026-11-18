@@ -11,7 +11,7 @@ VERSION = "1.0.0"
 
 #: What /hello says as "app". Today's phones only accept this name (plan 4.2).
 HELLO_APP = "Signal Lab analyst host"
-PROTOCOL = 1
+PROTOCOL = 2  # 2: pictures in the question, answers in a set shape, the feature list (today's phones don't read it)
 
 
 def home() -> Path:

@@ -1,7 +1,11 @@
-# ClaudeIn protocol (version 1)
+# ClaudeIn protocol (version 2)
 
 How an app talks to ClaudeIn. It is the Kotlin analyst host's protocol (`signal-lab-egx/analyst-host`) with optional
 additions, so today's Signal Lab phones work unchanged apart from the address.
+
+Version 2 adds pictures in the question (`images`), answers in a set shape (`output_schema`, `structured`,
+`error_kind: "format"`) and a feature list (`features` in `/hello` and `/check`). All of it is optional; a version 1 app
+works unchanged. Check `features` before using an addition.
 
 ## 1. Where
 
@@ -27,16 +31,28 @@ Every route except `/hello` needs the `Authorization` header. Bodies are JSON in
 ### `GET /hello`
 No code needed. A device reads the certificate here while pairing.
 ```json
-{"app": "Signal Lab analyst host", "protocol": 1, "claude": "2.1.325", "service": "ClaudeIn", "version": "0.2.0"}
+{"app": "Signal Lab analyst host", "protocol": 2, "claude": "2.1.325", "service": "ClaudeIn", "version": "1.0.0",
+ "features": ["images", "output_schema"]}
 ```
 `app` keeps the Kotlin host's name until both phone apps also accept `"ClaudeIn"`. New apps should look at `service`.
 `claude` is missing when its version is unknown.
 
+`features` lists what this PC can do **right now**, worked out from the Claude Code it checked:
+
+| Feature | Meaning |
+|---|---|
+| `images` | `POST /runs` takes `images` |
+| `output_schema` | `POST /runs` takes `output_schema` (this Claude Code has `--json-schema`) |
+
+The list is empty while Claude Code is missing, not yet checked, or not usable. More names will be added; ignore ones you
+don't know.
+
 ### `GET /check`
 ```json
-{"ok": true, "busy": false, "queue": 0}
+{"ok": true, "busy": false, "queue": 0, "features": ["images", "output_schema"]}
 ```
-`busy` is true only when ClaudeIn is paused or the line is full. `queue` is how many runs are waiting.
+`busy` is true only when ClaudeIn is paused or the line is full. `queue` is how many runs are waiting. `features` is the
+same list as in `/hello`.
 
 ### `POST /runs`
 Asks one question. The answer is a stream of server-sent events (see 3).
@@ -53,7 +69,10 @@ Asks one question. The answer is a stream of server-sent events (see 3).
   "app": "village",
   "builtin_tools": ["WebSearch", "WebFetch"],
   "max_turns": 20,
-  "tool_timeout_s": 60
+  "tool_timeout_s": 60,
+
+  "images": [{"data": "<base64>", "mime_type": "image/png"}],
+  "output_schema": {"type": "object", "properties": {"up": {"type": "boolean"}}, "required": ["up"]}
 }
 ```
 
@@ -69,8 +88,22 @@ Asks one question. The answer is a stream of server-sent events (see 3).
 | `builtin_tools` | no | default `["WebSearch","WebFetch"]`; `[]` for none. Nothing else is allowed |
 | `max_turns` | no | 1–200 |
 | `tool_timeout_s` | no | 5–600, default 60: how long a tool call waits for the app's answer |
+| `images` | no | pictures Claude sees before the prompt, in this order (feature `images`) |
+| `output_schema` | no | a JSON Schema the answer must follow; its top-level `type` must be `"object"`, at most 16 KB (feature `output_schema`) |
 
 App names become ids: `"Signal Lab EGX"` → `signal-lab-egx`.
+
+**Pictures** (`images`): each is `{"data": "<base64>", "mime_type": "..."}`. Types: `image/png`, `image/jpeg`
+(`image/jpg` is fine too), `image/webp`, `image/gif`. Up to 20, each at most 5 MB once decoded, and the whole request
+within 32 MB. Line breaks in the base64 are fine. A picture whose bytes aren't the type it says, bad base64, an empty
+picture, an unknown type or too many pictures get a 400 that says which picture is wrong. Claude gets one message: the
+pictures, then the prompt (with `history` in front of it, as always). Pictures are never logged or kept.
+
+**Answers in a set shape** (`output_schema`): Claude's answer must fit the schema. When it does, `done` carries the
+parsed answer as `structured` (and `answer` still has the text). When it doesn't, the run ends with `failed: Claude
+didn't answer in the requested shape.` and `error_kind: "format"`. The 16 KB limit is because the schema is given to
+Claude Code on its command line, which Windows keeps short. If this PC's Claude Code can't do it (`output_schema` is
+not in `features`), a run that asks for it ends with `error_kind: "unavailable"`.
 
 Errors before the stream starts: 400 `{"error": "Missing \"prompt\"."}` (bad request), 401 (wrong code or token),
 403 (device switched off, or `app` doesn't match the pairing), 429 (address blocked after 20 wrong codes; one hour).
@@ -117,11 +150,13 @@ types they don't know.
  "api_price_usd": 0.08,
  "limits": {"status": "allowed", "five_hour": 0.34, "seven_day": 0.12},
  "queued_ms": 0,
- "error_kind": "rate_limited"}
+ "error_kind": "rate_limited",
+ "structured": {"up": true}}
 ```
 - `usage` may be `{}` and `api_price_usd`, `limits` and `error_kind` may be missing (for example on a refusal).
 - `limits` is for the whole Claude plan: `five_hour` and `seven_day` are 0–1.
 - `queued_ms` (new) is how long the run waited in line.
+- `structured` (version 2) is there only when the run asked for `output_schema` and got an answer in that shape.
 
 **Endings** (as the Kotlin host):
 
@@ -144,7 +179,8 @@ types they don't know.
 | `paused` | the owner paused ClaudeIn | say the PC is paused |
 | `cap` | today's cap for this app is used up (phase 2) | wait until midnight |
 | `not_allowed` | the owner hasn't allowed this app to use that model | use another model |
-| `unavailable` | Claude Code can't run (not installed, won't start, too old, not compatible with ClaudeIn yet, or signed out), the line was full, or the run waited too long. The ending says which, in words for the owner | say the PC is not available |
+| `format` | the run asked for `output_schema` and Claude didn't answer in that shape (version 2) | ask again, perhaps with a simpler schema or clearer prompt |
+| `unavailable` | Claude Code can't run (not installed, won't start, too old, not compatible with ClaudeIn yet, or signed out), it can't do something the run asked for (such as `output_schema`), the line was full, or the run waited too long. The ending says which, in words for the owner | say the PC is not available |
 
 **ClaudeIn's own refusals** are normal `done` events, so phones show them unchanged:
 - `failed: ClaudeIn is paused on the PC.`
@@ -192,7 +228,11 @@ async for event in claudein_client.run(app="village", model="claude-opus-5-5", s
 
 result = await claudein_client.ask(...)    # the same, just the result
 result.ok, result.ending, result.answer, result.messages, result.usage, result.api_price_usd,
-result.turns, result.limits, result.error_kind, result.reason
+result.turns, result.limits, result.error_kind, result.reason, result.structured
+
+result = await claudein_client.ask(..., images=[Image(png_bytes), Image(jpeg_bytes, "image/jpeg")],
+                                   output_schema={"type": "object", ...})   # version 2
+result.structured                          # the parsed answer, or None
 ```
 - It reads `local.json` for the token and port, and reads it again once if ClaudeIn says the token is wrong.
 - It runs the program's tool handlers and sends their answers back. A handler that crashes becomes an error answer for
@@ -202,7 +242,8 @@ result.turns, result.limits, result.error_kind, result.reason
   refused the request outright (400, 401, 403).
 - Stopping early (`break` with `aclose()`, or cancelling the task) stops the run on the PC too.
 - For tests, `claudein_client.testing.FakeClaudeIn` has the same `run()` and `ask()`, scripted with `reply()`,
-  `fail()` and `unavailable()`.
+  `fail()` and `unavailable()`. `reply(..., structured={...})` fakes a shaped answer and `fail("format", ...)` a shape
+  failure.
 
 ## 4. Queue
 
@@ -213,4 +254,4 @@ waits at most 10 minutes; a run lasts at most 15 minutes. **There is no 409 any 
 ## 5. What ClaudeIn never keeps
 
 Logs and usage records hold only: time, app, device, model, wait, duration, the kind of ending, and token counts. Never
-codes, tokens, prompts, answers or tool data.
+codes, tokens, prompts, pictures, schemas, answers or tool data.

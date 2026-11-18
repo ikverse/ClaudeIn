@@ -54,7 +54,8 @@ REQUIRED_FLAGS: list[tuple[str, ...]] = [
     ("--verbose",), ("--model",),
 ]
 #: Flags ClaudeIn leaves out, with a note, when Claude Code no longer has them.
-OPTIONAL_FLAGS = ("--no-session-persistence", "--include-partial-messages", "--max-budget-usd")
+#: --json-schema is only needed by runs that ask for an answer in a set shape (protocol 2).
+OPTIONAL_FLAGS = ("--no-session-persistence", "--include-partial-messages", "--max-budget-usd", "--json-schema")
 
 _URL = re.compile(r"https://[^\s\"'<>]+")
 _SKIPPED = 0  # messages the SDK couldn't read, since ClaudeIn started (only a count, for diagnostics)
@@ -385,6 +386,16 @@ class ClaudeCode:
 
     def missing_optional(self) -> set[str]:
         return set(self.probe.missing_optional) if self.probe else set()
+
+    def features(self) -> list[str]:
+        """What apps may ask for on this PC right now (protocol 2's feature list). Empty until Claude Code has been
+        checked and found usable, since nothing works before that."""
+        if self.state != "ok":
+            return []
+        out = ["images"]
+        if "--json-schema" not in self.missing_optional():
+            out.append("output_schema")
+        return out
 
     def needs_setup(self) -> bool:
         return self.state != "ok" or self.signed_in is False

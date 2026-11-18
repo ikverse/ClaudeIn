@@ -31,7 +31,7 @@ class ClaudeInError(Exception):
 
 @dataclass
 class Image:
-    """A picture in a tool's answer. [data] is the raw bytes or base64 text."""
+    """A picture in the question (run(images=[...])) or in a tool's answer. [data] is the raw bytes or base64 text."""
 
     data: Union[bytes, str]
     mime_type: str = "image/png"
@@ -142,8 +142,9 @@ class Result:
     api_price_usd: float | None = None
     turns: int = 0
     limits: dict | None = None
-    error_kind: str | None = None  # rate_limited | service | limit | paused | cap | not_allowed | unavailable
+    error_kind: str | None = None  # rate_limited | service | limit | paused | cap | not_allowed | unavailable | format
     queued_ms: int = 0
+    structured: Any = None  # the answer in the shape asked for with output_schema (None otherwise)
 
     @property
     def ok(self) -> bool:
@@ -159,7 +160,7 @@ class Result:
         return cls(ending=str(d.get("ending", "")), answer=str(d.get("answer", "")), messages=messages,
                    usage=dict(d.get("usage") or {}), api_price_usd=d.get("api_price_usd"),
                    turns=int(d.get("turns") or 0), limits=d.get("limits"), error_kind=d.get("error_kind"),
-                   queued_ms=int(d.get("queued_ms") or 0))
+                   queued_ms=int(d.get("queued_ms") or 0), structured=d.get("structured"))
 
 
 @dataclass
@@ -249,8 +250,12 @@ async def _post_quietly(path: str, body: dict) -> None:
 
 async def run(*, app: str, model: str, system: str, prompt: str, history: list[dict] | None = None,
               tools: list[Tool] | None = None, builtin_tools: list[str] | None = None, max_turns: int | None = None,
-              max_budget_usd: float | None = None, tool_timeout_s: float | None = None) -> AsyncIterator[Event]:
+              max_budget_usd: float | None = None, tool_timeout_s: float | None = None,
+              images: list[Image] | None = None, output_schema: dict | None = None) -> AsyncIterator[Event]:
     """Asks one question and yields what happens, ending with Done(result).
+
+    [images] go to Claude in front of the prompt, in order. With [output_schema] (a JSON Schema of an object) the
+    answer comes back parsed in result.structured, or the run fails with error_kind "format".
 
     Raises ClaudeInUnavailable when ClaudeIn isn't running, and ClaudeInError when it refuses the request outright.
     Stopping early (break, aclose(), or cancelling the task) stops the run on the PC too.
@@ -270,6 +275,10 @@ async def run(*, app: str, model: str, system: str, prompt: str, history: list[d
         body["max_budget_usd"] = max_budget_usd
     if tool_timeout_s is not None:
         body["tool_timeout_s"] = tool_timeout_s
+    if images:
+        body["images"] = [{"data": b["data"], "mime_type": b["mime_type"]} for b in (i.block() for i in images)]
+    if output_schema is not None:
+        body["output_schema"] = output_schema
 
     resp = await _send("POST", "/runs", body)
     if resp.status != 200:

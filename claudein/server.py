@@ -118,6 +118,7 @@ class Server:
             body["claude"] = self.service.claude_version
         body["service"] = "ClaudeIn"
         body["version"] = VERSION
+        body["features"] = self.service.claude.features()
         return _json(200, body)
 
     async def check(self, request: web.Request) -> web.Response:
@@ -125,7 +126,8 @@ class Server:
         if isinstance(c, web.Response):
             return c
         s = self.service.scheduler
-        return _json(200, {"ok": True, "busy": self.service.settings.paused or s.full, "queue": len(s.waiting)})
+        return _json(200, {"ok": True, "busy": self.service.settings.paused or s.full, "queue": len(s.waiting),
+                           "features": self.service.claude.features()})
 
     async def stop_run(self, request: web.Request) -> web.Response:
         c = await self._caller(request)

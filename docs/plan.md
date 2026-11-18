@@ -435,6 +435,27 @@ its signature. `--dry-run` does everything but tag, push and publish.
 
 **First updater version:** 0.2.0. Copies on 0.1.0 have no updater and need one manual install.
 
+### 4.11 Protocol 2: features for more kinds of apps (phase 8)
+**Why:** EGX Analyzer (`..\android`) is moving onto ClaudeIn. It sends batches of screenshots, needs answers its code can
+parse, and has long runs, some started on a schedule. None of the additions is specific to it. Every new field is
+optional; today's phones and the Python client work unchanged, and `/hello` still says `"app": "Signal Lab analyst
+host"`. No phone app reads the `protocol` number (checked in `signal-lab-egx` and `signal-lab-android`), so it is now 2.
+- **Pictures in the question (8a):** `images` on `POST /runs`, PNG/JPEG/WebP/GIF, up to 20, each at most 5 MB decoded.
+  Each picture's first bytes must match its type. Line breaks in the base64 are allowed. With pictures, Claude Code is
+  given one message (the pictures in order, then the text) through the SDK's streaming input, which the SDK closes after
+  the answer; a retry rebuilds it. Without pictures the question is plain text exactly as before. Never logged.
+- **Answers in a set shape (8a):** `output_schema` (an object schema, at most **16 KB**: it goes to Claude Code as
+  `--json-schema` on its command line, and Windows caps a command line at about 32,000 characters). `done` gains
+  `structured`. No shaped answer → `failed: Claude didn't answer in the requested shape.`, `error_kind: "format"`.
+  `--json-schema` is an optional flag; without it, only runs asking for a shape are refused (`unavailable`).
+- **Feature list (8a):** `/hello` and `/check` carry `features`, worked out from the checked Claude Code: `images`, plus
+  `output_schema` when it has `--json-schema`; empty until Claude Code is checked and usable. 8b and 8c add `detach`,
+  `priority`, `effort` and `models`.
+- **8b (not approved yet):** runs that survive a dropped connection (`detach`, `seq`, `GET /runs/<id>`, replay), and
+  `priority: "background"`.
+- **8c (not approved yet):** `effort`, `GET /models`, `limits` in `/check`, and (only if the owner agrees, since points
+  aren't sent to apps today) `cap_left`.
+
 ## 5. Phases (each approved on its own)
 
 ### Phase 1: the service (tray, pairing, queue, usage), compatible with today's phones
@@ -557,6 +578,18 @@ processes by name and can download and run an installer look like malware to tha
   be flagged, and each new version starts with no reputation. The reliable fix is code-signing (not done; a paid
   certificate, Microsoft's Trusted Signing, or free open-source signing, to be looked into). The owner can also report a
   false alarm to Microsoft (microsoft.com/wdsi/filesubmission).
+
+### Phase 8a: pictures in the question, answers in a set shape, the feature list (built 2026-11-18)
+Section 4.11. The server, the runner, the Claude Code check (`--json-schema`), `claudein_client` (`images=`,
+`output_schema=`, `Result.structured`) and `FakeClaudeIn` (`reply(structured=...)`, `fail("format", ...)`).
+**Checked:** tests that lock in what today's apps rely on (`/hello` and `/check` fields, plain questions sent as text, no
+new fields on `done`) written before the change; every picture and schema check; the picture message and its retry;
+pictures absent from logs and usage; shaped answers and both kinds of `format` failure; a Claude Code without
+`--json-schema`; the feature list; the client and the fake; Village's own ClaudeIn tests. **Not yet done:** a real run
+with pictures or a schema (tests never start one).
+
+### Phase 8b: long runs and background priority (not approved yet)
+### Phase 8c: effort, models, limits, cap_left (not approved yet)
 
 ## 6. Later changes in the Signal Lab apps (belong to `signal-lab-egx`, need their own approval there)
 

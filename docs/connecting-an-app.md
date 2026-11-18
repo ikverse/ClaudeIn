@@ -86,6 +86,37 @@ result = await claudein_client.ask(
 - Normal (non-async) handlers run on the event loop's own thread, so they can use objects that belong to that thread,
   such as a sqlite connection.
 
+### Send pictures with the question
+
+```python
+from claudein_client import Image
+
+result = await claudein_client.ask(
+    app="my-app", model="claude-opus-5-5", system="...", prompt="What do these two charts show?",
+    images=[Image(open("a.png", "rb").read()),                    # bytes or base64 text
+            Image(open("b.jpg", "rb").read(), "image/jpeg")],     # png, jpeg, webp or gif
+)
+```
+
+Up to 20 pictures, each at most 5 MB. Claude sees them in the order given, before the prompt.
+
+### Get an answer your code can read
+
+```python
+SHAPE = {"type": "object",
+         "properties": {"trend": {"type": "string", "enum": ["up", "down", "flat"]}, "why": {"type": "string"}},
+         "required": ["trend", "why"]}
+
+result = await claudein_client.ask(app="my-app", model="claude-opus-5-5", system="...", prompt="...",
+                                   output_schema=SHAPE)
+if result.ok:
+    print(result.structured["trend"])          # already parsed; result.answer still has the text
+elif result.error_kind == "format":
+    ...                                        # Claude didn't answer in that shape: ask again, or simplify
+```
+
+The schema's top-level `type` must be `"object"`, and the whole schema at most 16 KB.
+
 ### Stream the answer as it is written
 
 ```python
@@ -115,6 +146,7 @@ Leaving the loop early (`break`, then `aclose()`), or cancelling the task, stops
 | `usage` | token counts: `input`, `output`, `cache_read`, `cache_write`, `searches`, `fetches` |
 | `api_price_usd` | what the run would have cost at API prices (the plan pays, not this) |
 | `turns`, `limits`, `queued_ms` | turns used, how full the Claude plan is (0-1), time spent waiting in line |
+| `structured` | the parsed answer when you passed `output_schema`, else `None` |
 
 ### Test without ClaudeIn
 
@@ -126,6 +158,8 @@ result = await fake.ask(app="my-app", model="claude-opus-5-5", system="s", promp
 
 fake = FakeClaudeIn().reply("Done.", tools=[("get_notes", {"day": "Monday"})])           # Claude "calls" a tool
 fake = FakeClaudeIn().unavailable()                                                       # raises ClaudeInUnavailable
+fake = FakeClaudeIn().reply('{"trend": "up"}', structured={"trend": "up"})              # a shaped answer
+fake = FakeClaudeIn().fail("format", "Claude didn't answer in the requested shape.")     # a shape failure
 ```
 
 `fake.calls` records what was asked; `fake.tool_answers` records what your handlers answered (`answer_text(body)`
@@ -157,16 +191,21 @@ once (the owner may have made a new token). Programs must send `"app"` on every 
 
 ### The four calls you need
 
-1. `GET /check` - is the PC there? `{"ok": true, "busy": false, "queue": 0}`
+1. `GET /check` - is the PC there? `{"ok": true, "busy": false, "queue": 0, "features": [...]}`
 2. `POST /runs` with `{"model", "system", "prompt"}` (plus optional `history`, `tools`, `builtin_tools`,
-   `max_turns`, `max_budget_usd`, `tool_timeout_s`, `app`). The answer is a stream of server-sent events:
-   `run` (the id) first, then `working`, `text`, `server_tool`, `tool`, and `done` last.
+   `max_turns`, `max_budget_usd`, `tool_timeout_s`, `app`, `images`, `output_schema`). The answer is a stream of
+   server-sent events: `run` (the id) first, then `working`, `text`, `server_tool`, `tool`, and `done` last.
 3. `POST /runs/<run id>/tools/<call id>` with `{"text": "...", "is_error": false}` - your answer to each `tool`
    event, within `tool_timeout_s` seconds.
 4. `POST /runs/<run id>/stop` with `{}` - stop a run.
 
 Fields, limits, events and pictures in tool answers are all in [`protocol.md`](protocol.md), sections 2 and 3.
 **Ignore event types you don't know**; new ones may be added. Lines starting with `:` are keep-alives.
+
+**Pictures and set-shape answers** (protocol 2): look for `"images"` and `"output_schema"` in the `features` list of
+`/hello` or `/check` first. Pictures go in `"images": [{"data": "<base64>", "mime_type": "image/png"}, ...]`; a
+schema goes in `"output_schema"`, and the parsed answer comes back as `structured` in `done`. Details in
+[`protocol.md`](protocol.md), section 2.
 
 ## Step 3: handle every way a run can end
 
@@ -182,7 +221,8 @@ ordinary `done` events with `ending: "failed: <reason>"`, so showing `reason` to
 | `paused` | the owner paused ClaudeIn | say "the PC is paused" |
 | `cap` | today's cap for your app is used up | wait until midnight (PC time) |
 | `not_allowed` | the owner hasn't allowed your app to use that model | use another model, or ask the owner |
-| `unavailable` | Claude Code can't run, the line was full, or the run waited too long | say "PC not available" |
+| `format` | you asked for `output_schema` and Claude didn't answer in that shape | ask again once, or simplify the schema |
+| `unavailable` | Claude Code can't run (or can't do what you asked, such as `output_schema`), the line was full, or the run waited too long | say "PC not available" |
 
 And before any run starts:
 
@@ -227,7 +267,7 @@ Claude, read `<path to ClaudeIn>\docs\connecting-an-app.md`.
   `app="<my-app>"`.
 - Phones: ClaudeIn's HTTPS protocol on port 8790, paired with the tray's "Pair a device…".
 - No API keys and no fallback. If ClaudeIn isn't reachable, show "PC not available".
-- Handle every `error_kind` (rate_limited, service, limit, paused, cap, not_allowed, unavailable).
+- Handle every `error_kind` (rate_limited, service, limit, paused, cap, not_allowed, format, unavailable).
 - Tests use `claudein_client.testing.FakeClaudeIn`, never the real ClaudeIn.
 ```
 
@@ -241,5 +281,7 @@ Claude, read `<path to ClaudeIn>\docs\connecting-an-app.md`.
 - [ ] Tool handlers answer within `tool_timeout_s`, and errors in them don't crash the app.
 - [ ] `working` events are shown while the run waits or searches.
 - [ ] The person can stop a long run (`/stop`, or leaving the `run()` loop).
+- [ ] Apps that send pictures or ask for a set shape check `features` first (phone apps), keep pictures within 20 and
+      5 MB each, and handle `error_kind: "format"`.
 - [ ] Tests use `FakeClaudeIn` (or a fake server) and pass without ClaudeIn running.
 - [ ] No codes, tokens or prompts end up in logs.

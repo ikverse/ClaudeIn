@@ -28,11 +28,12 @@ log = logging.getLogger("claudein")
 BRIDGE_NAME = "signallab"  # the MCP server name the Kotlin host used, so tool names stay mcp__signallab__<name>
 
 #: query_fn(prompt, options, tools) -> async iterator of SDK messages. Tests pass a fake; tools maps each tool's
-#: name to its handler, so a fake can "call" tools the way Claude Code would.
-QueryFn = Callable[[str, Any, dict[str, Callable[[dict], Awaitable[dict]]]], AsyncIterator[Any]]
+#: name to its handler, so a fake can "call" tools the way Claude Code would. [prompt] is text, or (with pictures)
+#: an async iterator of one user message.
+QueryFn = Callable[[Any, Any, dict[str, Callable[[dict], Awaitable[dict]]]], AsyncIterator[Any]]
 
 
-def sdk_query(prompt: str, options: Any, tools: dict) -> AsyncIterator[Any]:
+def sdk_query(prompt: Any, options: Any, tools: dict) -> AsyncIterator[Any]:
     from claude_agent_sdk import query
 
     return query(prompt=prompt, options=options)
@@ -48,6 +49,30 @@ def prompt_text(spec: RunSpec) -> str:
         out.append("The owner now asks:\n")
     out.append(spec.prompt)
     return "".join(out)
+
+
+def prompt_input(spec: RunSpec) -> str | AsyncIterator[dict]:
+    """What Claude Code is given: the text alone, as always, or (with pictures) one message holding the pictures in
+    the order given and then the text. Made afresh for each try, so a retry sends the same pictures again."""
+    text = prompt_text(spec)
+    if not spec.images:
+        return text
+    content: list[dict] = [{"type": "image", "source": {"type": "base64", "media_type": p.mime_type, "data": p.data}}
+                           for p in spec.images]
+    content.append({"type": "text", "text": text})
+
+    async def one_message() -> AsyncIterator[dict]:
+        # One message, then the end: the SDK closes Claude Code's input once the answer is in.
+        yield {"type": "user", "session_id": "", "message": {"role": "user", "content": content},
+               "parent_tool_use_id": None}
+
+    return one_message()
+
+
+SHAPE_FLAG = "--json-schema"
+#: Claude Code's own step that hands over a shaped answer; not a tool the app needs to see (only hidden in shaped runs).
+SHAPE_TOOL = "StructuredOutput"
+NO_SHAPE = "failed: Claude didn't answer in the requested shape."
 
 
 def reset_time(limits: dict | None) -> str | None:
@@ -121,6 +146,8 @@ class Runner:
             max_budget_usd=None if "--max-budget-usd" in gone else spec.max_budget_usd,
             max_turns=spec.max_turns,
             include_partial_messages="--include-partial-messages" not in gone,
+            output_format=({"type": "json_schema", "schema": spec.output_schema}
+                           if spec.output_schema is not None else None),
             cwd=str(workdir),
             env=self.claude.env() if self.claude is not None else {"ANTHROPIC_API_KEY": ""},
             extra_args=extra,
@@ -143,6 +170,9 @@ class Runner:
                     path = await self.claude.ready()
                 except Unavailable as e:
                     return runs.done("failed: " + e.message, error_kind="unavailable")
+                if run.spec.output_schema is not None and SHAPE_FLAG in self.claude.missing_optional():
+                    return runs.done("failed: The Claude Code on the PC is too old to answer in a set shape. Update "
+                                     "Claude Code on the PC.", error_kind="unavailable")
             attempt = await self._attempt(run, path)
             if attempt.got_result or attempt.touched or attempt.signed_out or run.closed or tries == 2:
                 break
@@ -173,6 +203,7 @@ class Runner:
             nonlocal touched
             touched = True
 
+        want_shape = run.spec.output_schema is not None
         job = winproc.Job()
         token = winproc.current_job.set(job)
         texts: list[str] = []
@@ -183,7 +214,7 @@ class Runner:
         crash: BaseException | None = None
         try:
             options, handlers = self.build(run, workdir, stderr, path, tool_called)
-            stream = self.query_fn(prompt_text(run.spec), options, handlers)
+            stream = self.query_fn(prompt_input(run.spec), options, handlers)
             try:
                 async with contextlib.aclosing(stream) as messages_in:
                     async for m in messages_in:
@@ -216,7 +247,8 @@ class Runner:
                             for b in m.content:
                                 if isinstance(b, TextBlock):
                                     said.append(b.text)
-                                elif isinstance(b, (ToolUseBlock, ServerToolUseBlock)) and not b.name.startswith("mcp__"):
+                                elif (isinstance(b, (ToolUseBlock, ServerToolUseBlock)) and not b.name.startswith("mcp__")
+                                      and not (want_shape and b.name == SHAPE_TOOL)):
                                     touched = True
                                     run.emit({"type": "server_tool", "name": b.name,
                                               "input": json.dumps(b.input or {}, separators=(",", ":"))})
@@ -239,11 +271,11 @@ class Runner:
 
         if limits:
             self.last_limits = limits
-        done, signed_out = self._ending(result, texts, refused, cut_short, limits, crash, errors)
+        done, signed_out = self._ending(result, texts, refused, cut_short, limits, crash, errors, want_shape)
         return _Attempt(done, result is not None, touched, signed_out)
 
     def _ending(self, r: Any, texts: list[str], refused: bool, cut_short: bool, limits: dict | None,
-                crash: BaseException | None, errors: list[str]) -> tuple[dict, bool]:
+                crash: BaseException | None, errors: list[str], want_shape: bool = False) -> tuple[dict, bool]:
         """(the done event, whether Claude Code said it is signed out)."""
         from claude_agent_sdk import CLINotFoundError
 
@@ -273,6 +305,8 @@ class Runner:
             ending = "declined"
         elif subtype in ("error_max_budget_usd", "error_max_turns"):
             ending, kind = "rounds", "limit"
+        elif want_shape and subtype == "error_max_structured_output_retries":
+            ending, kind = NO_SHAPE, "format"
         elif r.is_error or subtype != "success":
             plan_hit = (status == 429 or (limits or {}).get("status") == "rejected"
                         or "usage limit" in text.lower() or "limit reached" in text.lower())
@@ -290,9 +324,12 @@ class Runner:
                 ending = "failed: " + (text or subtype)[:300]
         elif cut_short or r.stop_reason == "max_tokens":
             ending = "cut short"
+        elif want_shape and getattr(r, "structured_output", None) is None:
+            ending, kind = NO_SHAPE, "format"
         else:
             ending = "done"
-        return runs.done(ending, answer, usage, cost, turns or 0, limits, kind), signed_out
+        shaped = getattr(r, "structured_output", None) if want_shape and ending == "done" else None
+        return runs.done(ending, answer, usage, cost, turns or 0, limits, kind, shaped), signed_out
 
 
 def _signed_out(text: str) -> bool:
