@@ -4,8 +4,9 @@ How an app talks to ClaudeIn. It is the Kotlin analyst host's protocol (`signal-
 additions, so today's Signal Lab phones work unchanged apart from the address.
 
 Version 2 adds pictures in the question (`images`), answers in a set shape (`output_schema`, `structured`,
-`error_kind: "format"`) and a feature list (`features` in `/hello` and `/check`). All of it is optional; a version 1 app
-works unchanged. Check `features` before using an addition.
+`error_kind: "format"`), a feature list (`features` in `/hello` and `/check`), numbered events (`seq`), runs that
+carry on when the caller goes away (`detach`, `GET /runs/<id>`, `GET /runs/<id>/events`) and background priority
+(`priority`). All of it is optional; a version 1 app works unchanged. Check `features` before using an addition.
 
 ## 1. Where
 
@@ -32,7 +33,7 @@ Every route except `/hello` needs the `Authorization` header. Bodies are JSON in
 No code needed. A device reads the certificate here while pairing.
 ```json
 {"app": "Signal Lab analyst host", "protocol": 2, "claude": "2.1.325", "service": "ClaudeIn", "version": "1.0.0",
- "features": ["images", "output_schema"]}
+ "features": ["images", "output_schema", "detach", "priority"]}
 ```
 `app` keeps the Kotlin host's name until both phone apps also accept `"ClaudeIn"`. New apps should look at `service`.
 `claude` is missing when its version is unknown.
@@ -43,15 +44,17 @@ No code needed. A device reads the certificate here while pairing.
 |---|---|
 | `images` | `POST /runs` takes `images` |
 | `output_schema` | `POST /runs` takes `output_schema` (this Claude Code has `--json-schema`) |
+| `detach` | `POST /runs` takes `detach`; `GET /runs/<id>` and `GET /runs/<id>/events` work |
+| `priority` | `POST /runs` takes `priority` |
 
 The list is empty while Claude Code is missing, not yet checked, or not usable. More names will be added; ignore ones you
 don't know.
 
 ### `GET /check`
 ```json
-{"ok": true, "busy": false, "queue": 0, "features": ["images", "output_schema"]}
+{"ok": true, "busy": false, "queue": 0, "features": ["images", "output_schema", "detach", "priority"]}
 ```
-`busy` is true only when ClaudeIn is paused or the line is full. `queue` is how many runs are waiting. `features` is the
+`busy` is true only when ClaudeIn is paused or the line for interactive questions is full. `queue` is how many runs are waiting. `features` is the
 same list as in `/hello`.
 
 ### `POST /runs`
@@ -72,7 +75,9 @@ Asks one question. The answer is a stream of server-sent events (see 3).
   "tool_timeout_s": 60,
 
   "images": [{"data": "<base64>", "mime_type": "image/png"}],
-  "output_schema": {"type": "object", "properties": {"up": {"type": "boolean"}}, "required": ["up"]}
+  "output_schema": {"type": "object", "properties": {"up": {"type": "boolean"}}, "required": ["up"]},
+  "detach": true,
+  "priority": "background"
 }
 ```
 
@@ -90,6 +95,8 @@ Asks one question. The answer is a stream of server-sent events (see 3).
 | `tool_timeout_s` | no | 5–600, default 60: how long a tool call waits for the app's answer |
 | `images` | no | pictures Claude sees before the prompt, in this order (feature `images`) |
 | `output_schema` | no | a JSON Schema the answer must follow; its top-level `type` must be `"object"`, at most 16 KB (feature `output_schema`) |
+| `detach` | no | `true`: the run carries on if the caller goes away (see "Long runs" below). Not with `tools` (400) |
+| `priority` | no | `"interactive"` (default) or `"background"`: wait behind every interactive question (section 4) |
 
 App names become ids: `"Signal Lab EGX"` → `signal-lab-egx`.
 
@@ -106,7 +113,8 @@ Claude Code on its command line, which Windows keeps short. If this PC's Claude 
 not in `features`), a run that asks for it ends with `error_kind: "unavailable"`.
 
 Errors before the stream starts: 400 `{"error": "Missing \"prompt\"."}` (bad request), 401 (wrong code or token),
-403 (device switched off, or `app` doesn't match the pairing), 429 (address blocked after 20 wrong codes; one hour).
+403 (device switched off, or `app` doesn't match the pairing), 429 (address blocked after 20 wrong codes for an hour,
+or, with `detach`, the app already has 10 detached runs; the `error` text says which).
 A wrong code waits a little longer each time, up to 5 s.
 
 ### `POST /runs/<id>/tools/<call>`
@@ -125,13 +133,39 @@ that asked the run may answer.
 
 ### `POST /runs/<id>/stop`
 Stops the run at once (Claude Code and everything it started end). Body `{}`. Answers `{"ok": true}` or 404. A run still
-waiting in line just leaves the line.
+waiting in line just leaves the line. On a **finished detached** run it drops the kept answer, freeing one of the app's
+10 places.
+
+### Long runs: `detach` (version 2)
+With `"detach": true` the stream is sent as usual, but if the caller goes away (the phone sleeps, the network drops, the
+app is closed) the run carries on. The app picks it up again with:
+
+- `GET /runs/<id>`: `{"id": "...", "state": "waiting" | "running" | "done", "done": {...} | null, "queued_ms": 1200,
+  "last_seq": 14}`. `done` is the run's `done` event once it has ended; `last_seq` is the newest event's number.
+- `GET /runs/<id>/events?after=<seq>`: the same event stream, starting with the events after number `seq` (leave
+  `after` out, or 0, for all of them), then new ones live until `done`. Leaving this stream never stops the run.
+  An `after` that isn't a whole number of 0 or more gets 400.
+
+Rules:
+- A finished detached run is kept for **60 minutes**, then dropped (404 after that). Detached runs live only in memory:
+  **if ClaudeIn or the PC restarts, they are gone** (404).
+- At most **10** detached runs per app, waiting, running or kept. One more gets **429**. Stop a kept run you have read
+  (`/stop`) to free its place.
+- Only the device that started a run can read it, pick it up or stop it. Programs on this PC all share the local token,
+  so any of them can read a program's run. Anyone else gets 404, as for a run that doesn't exist.
+- Forgetting the device, or switching it off, ends its detached runs and drops their kept answers. (Switching a device
+  off doesn't stop its other runs, which it is still watching.)
+- `detach` can't be used with `tools`: a tool call would have nobody to answer it. `builtin_tools` are fine.
+- The 15-minute run limit still applies.
 
 ## 3. The event stream
 
 `Content-Type: text/event-stream`. Each event is one line `data: <JSON>` and a blank line. A comment line
-`: still working` goes out every 5 seconds; if it can't be delivered, ClaudeIn stops the run. Apps must ignore event
-types they don't know.
+`: still working` goes out every 5 seconds; if it can't be delivered, ClaudeIn stops the run (unless it was started with
+`detach`). Apps must ignore event types and fields they don't know.
+
+Every event has `seq` (version 2): its number in the run, from 1 (the `run` event) upwards with no gaps, the same in
+every stream of that run. Use it with `GET /runs/<id>/events?after=<seq>`.
 
 ### 3.1 Events
 | `type` | Fields | Meaning |
@@ -233,6 +267,13 @@ result.turns, result.limits, result.error_kind, result.reason, result.structured
 result = await claudein_client.ask(..., images=[Image(png_bytes), Image(jpeg_bytes, "image/jpeg")],
                                    output_schema={"type": "object", ...})   # version 2
 result.structured                          # the parsed answer, or None
+
+stream = claudein_client.run(..., detach=True, priority="background")   # version 2: a long job
+started = await stream.__anext__()         # Started(run_id, seq=1); every event has .seq
+await stream.aclose()                      # with detach, leaving does not stop the run
+state = await claudein_client.get_run(started.run_id)       # RunState: state, result, queued_ms, last_seq
+async for event in claudein_client.resume(started.run_id, after=started.seq):
+    ...                                    # the events after that number, then live, ending with Done
 ```
 - It reads `local.json` for the token and port, and reads it again once if ClaudeIn says the token is wrong.
 - It runs the program's tool handlers and sends their answers back. A handler that crashes becomes an error answer for
@@ -240,16 +281,26 @@ result.structured                          # the parsed answer, or None
 - `result.messages` is the answer split where Claude stopped to use a tool, in order.
 - `ClaudeInUnavailable` means "PC not available" (ClaudeIn isn't running or set up). `ClaudeInError` means ClaudeIn
   refused the request outright (400, 401, 403).
-- Stopping early (`break` with `aclose()`, or cancelling the task) stops the run on the PC too.
-- For tests, `claudein_client.testing.FakeClaudeIn` has the same `run()` and `ask()`, scripted with `reply()`,
-  `fail()` and `unavailable()`. `reply(..., structured={...})` fakes a shaped answer and `fail("format", ...)` a shape
-  failure.
+- Stopping early (`break` with `aclose()`, or cancelling the task) stops the run on the PC too, unless it was started
+  with `detach=True`.
+- For tests, `claudein_client.testing.FakeClaudeIn` has the same `run()`, `ask()`, `get_run()` and `resume()`, scripted
+  with `reply()`, `fail()` and `unavailable()`. `reply(..., structured={...})` fakes a shaped answer and
+  `fail("format", ...)` a shape failure. The fake keeps every run, so `get_run` and `resume` work on any of them.
 
 ## 4. Queue
 
-ClaudeIn runs a few questions at once (2 by default; the owner can pick 1–4). The rest wait in order, and phone questions
-go ahead of waiting program questions. A waiting run gets `working` events with its place in line. At most 20 wait; a run
-waits at most 10 minutes; a run lasts at most 15 minutes. **There is no 409 any more.**
+ClaudeIn runs a few questions at once (2 by default; the owner can pick 1–4). The rest wait in this order:
+
+1. interactive phone questions,
+2. interactive program questions,
+3. `"priority": "background"` runs, from phones and programs alike, in the order they arrived.
+
+Within each group, runs keep their order. A run already going is never stopped to make room. A waiting run gets
+`working` events with its place in line (counting everything ahead of it). At most 20 interactive runs wait, and
+separately at most 20 background runs, so background jobs never crowd out a person; one more gets
+`failed: The PC has too many questions waiting.` An interactive run waits at most 10 minutes, a background run at most
+**30 minutes**, then gets `failed: The PC was busy for too long. Try again.` A run lasts at most 15 minutes.
+**There is no 409 any more.**
 
 ## 5. What ClaudeIn never keeps
 

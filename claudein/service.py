@@ -9,12 +9,13 @@ import asyncio
 import ipaddress
 import logging
 import socket
+import time
 from pathlib import Path
 from typing import Callable
 
 from aiohttp import web
 
-from . import config, tls
+from . import config, runs, tls
 from .claudecode import ClaudeCode
 from .pairing import Device, LocalToken, Pairings, WrongCodeGuard
 from .runner import QueryFn, Runner
@@ -25,6 +26,7 @@ from .updates import Updater
 from .usage import Usage, log_run, setup_logs
 
 CLAUDE_RECHECK_S = 15 * 60  # how often Claude Code and the account are looked at again (free, no question)
+SWEEP_EVERY_S = 60  # how often finished detached runs older than an hour are dropped
 
 
 class Service:
@@ -47,7 +49,8 @@ class Service:
         self._claude_watch: asyncio.Task | None = None
         self.updates = updater or Updater(self.folder, self.settings, self.changed)
         self._update_watch: asyncio.Task | None = None
-        self.runs: dict[str, Run] = {}
+        self._sweeper: asyncio.Task | None = None
+        self.runs: dict[str, Run] = {}  # runs being streamed, and detached runs until an hour after they end
         self.scheduler = Scheduler(self.settings, self.runner.execute, on_finished=self.run_finished,
                                    on_change=self.changed, over_cap=self.over_cap)
         self.server = Server(self)
@@ -97,6 +100,8 @@ class Service:
             self._claude_watch = asyncio.create_task(self._watch_claude())
         if self._update_watch is None:  # a minute from now, then every 12 hours, while the switch is on
             self._update_watch = asyncio.create_task(self.updates.watch())
+        if self._sweeper is None:
+            self._sweeper = asyncio.create_task(self._sweep_now_and_then())
         pport =self.settings.phone_port if phone_port is None else phone_port
         lport = self.settings.local_port if local_port is None else local_port
         ctx = tls.server_context(self.folder) if use_tls else None
@@ -130,7 +135,42 @@ class Service:
             await asyncio.sleep(CLAUDE_RECHECK_S)
             await self.claude.refresh()
 
+    async def _sweep_now_and_then(self) -> None:
+        while True:
+            await asyncio.sleep(SWEEP_EVERY_S)
+            self.sweep()
+
+    # --- detached runs (phase 8b) ---------------------------------------------------------------------------------------
+
+    def sweep(self) -> None:
+        """Drops finished detached runs kept longer than an hour. They live only in memory."""
+        now = time.monotonic()
+        for rid, run in list(self.runs.items()):
+            if run.spec.detach and run.finished_mono is not None and now - run.finished_mono >= runs.KEEP_DETACHED_S:
+                self.runs.pop(rid, None)
+
+    def detached_count(self, app_id: str) -> int:
+        """Detached runs of [app_id] waiting, running or kept."""
+        self.sweep()
+        return sum(1 for r in self.runs.values() if r.spec.detach and r.app_id == app_id)
+
+    def _end_detached(self, device_id: str) -> None:
+        """Stops the device's detached runs and drops the kept ones (nobody may read them any more)."""
+        for rid, run in list(self.runs.items()):
+            if run.spec.detach and run.is_phone and run.device_id == device_id:
+                run.close()
+                self.runs.pop(rid, None)
+
+    def set_device_enabled(self, device_id: str, on: bool) -> None:
+        """The device switch. Off: its new requests are refused and its detached runs end; its other runs (which it
+        is still watching) carry on, as before."""
+        self.pairings.set_enabled(device_id, on)
+        if not on:
+            self._end_detached(device_id)
+
     async def stop(self) -> None:
+        if self._sweeper is not None:
+            self._sweeper.cancel()
         if self._claude_watch is not None:
             self._claude_watch.cancel()
         if self._update_watch is not None:
@@ -152,6 +192,7 @@ class Service:
         """Deletes the device's code for good; its runs stop at once."""
         self.pairings.forget(device_id)
         self.scheduler.stop_device(device_id)
+        self._end_detached(device_id)
 
     def status(self) -> dict:
         s = self.scheduler

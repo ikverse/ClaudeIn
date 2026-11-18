@@ -36,6 +36,7 @@ class Settings:
     workers: int = 2  # runs at once, 1-4
     max_waiting: int = 20
     wait_limit_min: float = 10  # longest time in line before giving up
+    background_wait_limit_min: float = 30  # the same for background runs (nobody is watching them)
     run_limit_min: float = 15  # longest a run may last
     keep_awake: bool = False  # keep the PC awake all the time, not only while busy
     paused: bool = False

@@ -16,7 +16,9 @@ from claudein.runs import MAX_IMAGE_BYTES, BadRequest, RunSpec
 
 from .conftest import m, result, spec, stream_text, update_fake_claude
 
-TODAY_DONE_KEYS = {"type", "ending", "answer", "usage", "turns", "api_price_usd", "limits", "queued_ms"}
+#: done's fields today, plus "seq" (phase 8b numbers every event; the phones and Village ignore fields they don't know)
+TODAY_DONE_KEYS = {"type", "ending", "answer", "usage", "turns", "api_price_usd", "limits", "queued_ms", "seq"}
+FEATURES = ["images", "output_schema", "detach", "priority"]
 
 
 # --- what today's apps rely on ------------------------------------------------------------------------------------------
@@ -233,8 +235,8 @@ async def test_claude_code_without_json_schema(svc, phone, fake, cli):
     update_fake_claude(svc.claude, cli, "2.1.326", [f for f in cli.flags if f != "--json-schema"])
     await svc.claude.refresh()
     _, body = await phone.get("/hello", auth=None)
-    assert body["features"] == ["images"]
-    done = (await phone.ask(spec(output_schema=SHAPE)))[-1]
+    assert body["features"] == ["images", "detach", "priority"]
+    done =(await phone.ask(spec(output_schema=SHAPE)))[-1]
     assert done["error_kind"] == "unavailable" and "set shape" in done["ending"]
     assert fake.calls == []  # refused before Claude Code was asked
     assert (await phone.ask(spec()))[-1]["ending"] == "done"  # plain questions still work
@@ -244,11 +246,11 @@ async def test_claude_code_without_json_schema(svc, phone, fake, cli):
 
 async def test_feature_list(svc, phone, program):
     _, hello = await phone.get("/hello", auth=None)
-    assert hello["protocol"] == 2 and hello["features"] == ["images", "output_schema"]
+    assert hello["protocol"] == 2 and hello["features"] == FEATURES
     _, check = await phone.get("/check")
-    assert check["features"] == ["images", "output_schema"]
+    assert check["features"] == FEATURES
     _, check = await program.get("/check")
-    assert check["features"] == ["images", "output_schema"]
+    assert check["features"] == FEATURES
 
 
 async def test_feature_list_empty_when_claude_code_unusable(svc, phone, cli):

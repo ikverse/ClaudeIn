@@ -22,6 +22,9 @@ MAX_SCHEMA_BYTES = 16 * 1024
 _IMAGE_TYPES = {"image/png": "png", "image/jpeg": "jpeg", "image/jpg": "jpeg", "image/webp": "webp",
                 "image/gif": "gif"}
 _WHITESPACE = re.compile(r"\s+")
+PRIORITIES = ("interactive", "background")
+MAX_DETACHED_PER_APP = 10  # detached runs waiting, running or kept, per app
+KEEP_DETACHED_S = 60 * 60  # a finished detached run is kept this long, in memory only
 
 
 class BadRequest(ValueError):
@@ -118,6 +121,8 @@ class RunSpec:
     app: str | None = None  # optional "app" from the request
     images: list[Picture] = field(default_factory=list)  # pictures in the question (protocol 2)
     output_schema: dict | None = None  # the shape the answer must have (protocol 2)
+    detach: bool = False  # the run carries on if the caller goes away (protocol 2, phase 8b)
+    priority: str = "interactive"  # or "background": waits behind every interactive run (phase 8b)
 
     @classmethod
     def parse(cls, o: Any) -> "RunSpec":
@@ -164,6 +169,14 @@ class RunSpec:
         app = o.get("app")
         if app is not None and (not isinstance(app, str) or not app.strip()):
             raise BadRequest('"app" must be a name.')
+        detach = o.get("detach", False)
+        if not isinstance(detach, bool):
+            raise BadRequest('"detach" must be true or false.')
+        if detach and tools:
+            raise BadRequest('"detach" can\'t be used with "tools": a tool call would have nobody to answer it.')
+        priority = o.get("priority", "interactive")
+        if priority not in PRIORITIES:
+            raise BadRequest('"priority" must be "interactive" or "background".')
         return cls(
             model=model,
             system=need("system"),
@@ -177,6 +190,8 @@ class RunSpec:
             app=app.strip() if isinstance(app, str) else None,
             images=_pictures(o.get("images")),
             output_schema=_schema(o.get("output_schema")),
+            detach=detach,
+            priority=priority,
         )
 
 
@@ -253,7 +268,10 @@ class Run:
         self.asked_at = time.time()
         self.asked_mono = time.monotonic()
         self.started_mono: float | None = None
-        self.events: asyncio.Queue[dict] = asyncio.Queue()
+        self.finished_mono: float | None = None
+        #: Every event so far, numbered by "seq" from 1 (the "run" event), so a caller can pick up where it left off.
+        self.log: list[dict] = []
+        self._tick = asyncio.Event()  # set (and replaced) whenever an event is added
         self.closed = False
         self.close_ending = "stopped"
         self.close_kind: str | None = None
@@ -262,23 +280,52 @@ class Run:
         self.on_close: Callable[["Run"], None] | None = None  # set by the queue
         self._pending: dict[str, asyncio.Future] = {}
         self._calls = 0
+        self._add({"type": "run", "id": self.id})
 
     @property
     def queued_ms(self) -> int:
         end = self.started_mono if self.started_mono is not None else time.monotonic()
         return int((end - self.asked_mono) * 1000)
 
+    @property
+    def state(self) -> str:
+        if self.result is not None:
+            return "done"
+        return "running" if self.started_mono is not None else "waiting"
+
+    @property
+    def last_seq(self) -> int:
+        return len(self.log)
+
+    def _add(self, event: dict) -> None:
+        event["seq"] = len(self.log) + 1
+        self.log.append(event)
+        tick, self._tick = self._tick, asyncio.Event()
+        tick.set()
+
+    async def wait_past(self, seq: int, timeout: float) -> bool:
+        """Waits until there is an event after [seq]; False if none came within [timeout] seconds."""
+        if len(self.log) > seq:
+            return True
+        tick = self._tick
+        try:
+            await asyncio.wait_for(tick.wait(), timeout)
+        except asyncio.TimeoutError:
+            return False
+        return True
+
     def emit(self, event: dict) -> None:
         if self.result is None:
-            self.events.put_nowait(event)
+            self._add(event)
 
     def finish(self, done_event: dict) -> None:
         """Sends the done event (once) and marks the run over."""
         if self.result is not None:
             return
         done_event.setdefault("queued_ms", self.queued_ms)
-        self.events.put_nowait(done_event)
+        self._add(done_event)
         self.result = done_event
+        self.finished_mono = time.monotonic()
         self.finished.set()
         for f in self._pending.values():
             if not f.done():

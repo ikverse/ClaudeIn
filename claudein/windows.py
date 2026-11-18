@@ -536,7 +536,7 @@ class DevicesPage(Page):
                 sw.setOnText("On")
                 sw.setOffText("Off")
                 sw.setChecked(d.enabled)
-                sw.checkedChanged.connect(lambda on, i=d.id: self.svc.pairings.set_enabled(i, on))
+                sw.checkedChanged.connect(lambda on, i=d.id: self.svc.set_device_enabled(i, on))
                 forget = PushButton(FluentIcon.DELETE, "Forget…")
                 forget.clicked.connect(lambda _=False, dev=d: self._forget(dev))
                 box = QWidget()

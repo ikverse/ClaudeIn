@@ -395,7 +395,7 @@ class ClaudeCode:
         out = ["images"]
         if "--json-schema" not in self.missing_optional():
             out.append("output_schema")
-        return out
+        return out + ["detach", "priority"]
 
     def needs_setup(self) -> bool:
         return self.state != "ok" or self.signed_in is False

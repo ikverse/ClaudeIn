@@ -105,25 +105,31 @@ async def call_handler(tool: Tool | None, name: str, tool_input: dict) -> dict:
 
 # --- events and the result -------------------------------------------------------------------------------------------------
 
+# Every event has `seq`, its number in the run (from 1), for resume(run_id, after=seq).
+
 @dataclass
 class Started:
     run_id: str
+    seq: int = 0
 
 
 @dataclass
 class Text:
     delta: str
+    seq: int = 0
 
 
 @dataclass
 class Working:
     what: str
+    seq: int = 0
 
 
 @dataclass
 class ServerTool:
     name: str
     input: str  # JSON text, as ClaudeIn sends it
+    seq: int = 0
 
 
 @dataclass
@@ -131,6 +137,7 @@ class ToolCall:
     id: str
     name: str
     input: dict
+    seq: int = 0
 
 
 @dataclass
@@ -166,6 +173,18 @@ class Result:
 @dataclass
 class Done:
     result: Result
+    seq: int = 0
+
+
+@dataclass
+class RunState:
+    """What get_run() says about a run: "waiting", "running" or "done" (then `result` is set)."""
+
+    run_id: str
+    state: str
+    result: Result | None = None
+    queued_ms: int = 0
+    last_seq: int = 0
 
 
 Event = Union[Started, Text, Working, ServerTool, ToolCall, Done]
@@ -251,11 +270,15 @@ async def _post_quietly(path: str, body: dict) -> None:
 async def run(*, app: str, model: str, system: str, prompt: str, history: list[dict] | None = None,
               tools: list[Tool] | None = None, builtin_tools: list[str] | None = None, max_turns: int | None = None,
               max_budget_usd: float | None = None, tool_timeout_s: float | None = None,
-              images: list[Image] | None = None, output_schema: dict | None = None) -> AsyncIterator[Event]:
+              images: list[Image] | None = None, output_schema: dict | None = None, detach: bool = False,
+              priority: str | None = None) -> AsyncIterator[Event]:
     """Asks one question and yields what happens, ending with Done(result).
 
     [images] go to Claude in front of the prompt, in order. With [output_schema] (a JSON Schema of an object) the
     answer comes back parsed in result.structured, or the run fails with error_kind "format".
+    With [detach] the run carries on if this program goes away or stops reading (pick it up again with
+    resume(run_id, after=seq)); it can't be used with [tools]. [priority] "background" waits behind every
+    interactive question.
 
     Raises ClaudeInUnavailable when ClaudeIn isn't running, and ClaudeInError when it refuses the request outright.
     Stopping early (break, aclose(), or cancelling the task) stops the run on the PC too.
@@ -279,61 +302,113 @@ async def run(*, app: str, model: str, system: str, prompt: str, history: list[d
         body["images"] = [{"data": b["data"], "mime_type": b["mime_type"]} for b in (i.block() for i in images)]
     if output_schema is not None:
         body["output_schema"] = output_schema
+    if detach:
+        body["detach"] = True
+    if priority is not None:
+        body["priority"] = priority
 
     resp = await _send("POST", "/runs", body)
     if resp.status != 200:
-        err = await resp.json()
-        await resp.close()
-        raise ClaudeInError(resp.status, str(err.get("error") or "ClaudeIn refused the request."))
+        raise await _refused(resp)
 
     run_id: str | None = None
     finished = False
     pending: set[asyncio.Task] = set()
-    texts = _Messages()
 
     async def answer(call_id: str, name: str, tool_input: dict) -> None:
         a = await call_handler(by_name.get(name), name, tool_input)
         await _post_quietly(f"/runs/{run_id}/tools/{call_id}", a)
 
     try:
-        async for line in resp.lines():
-            if not line.startswith("data: "):
-                continue  # ": still working" and blank lines
-            try:
-                e = json.loads(line[6:])
-            except ValueError:
-                continue
-            kind = e.get("type")
-            if kind == "run":
-                run_id = str(e.get("id"))
-                yield Started(run_id)
-            elif kind == "text":
-                texts.text(str(e.get("delta", "")))
-                yield Text(str(e.get("delta", "")))
-            elif kind == "working":
-                yield Working(str(e.get("what", "")))
-            elif kind == "server_tool":
-                texts.cut()
-                yield ServerTool(str(e.get("name", "")), str(e.get("input", "")))
-            elif kind == "tool":
-                texts.cut()
-                call = ToolCall(str(e.get("id")), str(e.get("name")), dict(e.get("input") or {}))
-                task = asyncio.ensure_future(answer(call.id, call.name, call.input))
+        async for event in _events(resp):
+            if isinstance(event, Started):
+                run_id = event.run_id
+            elif isinstance(event, ToolCall):
+                task = asyncio.ensure_future(answer(event.id, event.name, event.input))
                 pending.add(task)
                 task.add_done_callback(pending.discard)
-                yield call
-            elif kind == "done":
+            elif isinstance(event, Done):
                 finished = True
-                yield Done(Result.from_done(e, texts.all()))
+            yield event
+            if finished:
                 return
-            # other event types are ignored, as the protocol asks
         raise ClaudeInUnavailable("PC not available: ClaudeIn stopped before answering.")
     finally:
         for t in pending:
             t.cancel()
         await resp.close()
-        if not finished and run_id is not None:
+        if not finished and run_id is not None and not detach:
             await _post_quietly(f"/runs/{run_id}/stop", {})  # stopped early: stop Claude Code on the PC too
+
+
+async def _events(resp: _http.Response) -> AsyncIterator[Event]:
+    """The events of one stream, up to and including Done."""
+    texts = _Messages()
+    async for line in resp.lines():
+        if not line.startswith("data: "):
+            continue  # ": still working" and blank lines
+        try:
+            e = json.loads(line[6:])
+        except ValueError:
+            continue
+        kind = e.get("type")
+        seq = int(e.get("seq") or 0)
+        if kind == "run":
+            yield Started(str(e.get("id")), seq)
+        elif kind == "text":
+            texts.text(str(e.get("delta", "")))
+            yield Text(str(e.get("delta", "")), seq)
+        elif kind == "working":
+            yield Working(str(e.get("what", "")), seq)
+        elif kind == "server_tool":
+            texts.cut()
+            yield ServerTool(str(e.get("name", "")), str(e.get("input", "")), seq)
+        elif kind == "tool":
+            texts.cut()
+            yield ToolCall(str(e.get("id")), str(e.get("name")), dict(e.get("input") or {}), seq)
+        elif kind == "done":
+            yield Done(Result.from_done(e, texts.all()), seq)
+            return
+        # other event types are ignored, as the protocol asks
+
+
+async def _refused(resp: _http.Response) -> "ClaudeInError":
+    err = await resp.json()
+    await resp.close()
+    return ClaudeInError(resp.status, str(err.get("error") or "ClaudeIn refused the request."))
+
+
+async def get_run(run_id: str) -> RunState:
+    """Where a run stands. Raises ClaudeInError (404) when ClaudeIn doesn't have it: it ended over an hour ago,
+    ClaudeIn restarted, or it isn't this PC's programs' run."""
+    resp = await _send("GET", f"/runs/{run_id}", None)
+    if resp.status != 200:
+        raise await _refused(resp)
+    d = await resp.json()
+    await resp.close()
+    done = d.get("done")
+    result = None
+    if isinstance(done, dict):
+        answer = str(done.get("answer") or "")
+        result = Result.from_done(done, [answer] if answer else [])
+    return RunState(str(d.get("id") or run_id), str(d.get("state") or ""), result,
+                    int(d.get("queued_ms") or 0), int(d.get("last_seq") or 0))
+
+
+async def resume(run_id: str, after: int = 0) -> AsyncIterator[Event]:
+    """The events of a run after number [after] (all of them with 0), then new ones until Done. Leaving early never
+    stops the run. result.messages holds only the text seen in this stream."""
+    resp = await _send("GET", f"/runs/{run_id}/events?after={int(after)}", None)
+    if resp.status != 200:
+        raise await _refused(resp)
+    try:
+        async for event in _events(resp):
+            yield event
+            if isinstance(event, Done):
+                return
+        raise ClaudeInUnavailable("PC not available: ClaudeIn stopped before answering.")
+    finally:
+        await resp.close()
 
 
 async def ask(**kwargs) -> Result:

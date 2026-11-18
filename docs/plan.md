@@ -449,10 +449,18 @@ host"`. No phone app reads the `protocol` number (checked in `signal-lab-egx` an
   `structured`. No shaped answer → `failed: Claude didn't answer in the requested shape.`, `error_kind: "format"`.
   `--json-schema` is an optional flag; without it, only runs asking for a shape are refused (`unavailable`).
 - **Feature list (8a):** `/hello` and `/check` carry `features`, worked out from the checked Claude Code: `images`, plus
-  `output_schema` when it has `--json-schema`; empty until Claude Code is checked and usable. 8b and 8c add `detach`,
-  `priority`, `effort` and `models`.
-- **8b (not approved yet):** runs that survive a dropped connection (`detach`, `seq`, `GET /runs/<id>`, replay), and
-  `priority: "background"`.
+  `output_schema` when it has `--json-schema`; empty until Claude Code is checked and usable. 8b adds `detach` and
+  `priority`; 8c will add `effort` and `models`.
+- **Long runs (8b):** every event gets `seq` (from 1, the `run` event); each run keeps its events in memory. With
+  `detach`, a dropped connection doesn't stop the run; `GET /runs/<id>` says where it stands (with `last_seq`) and
+  `GET /runs/<id>/events?after=<seq>` replays and then goes on live. Finished detached runs are kept 60 minutes, in
+  memory only (lost on restart). At most 10 per app (waiting, running or kept); one more is 429 (409 is never used).
+  `/stop` on a kept run drops it, to free a place. Only the starting device (or, for programs, the local token) can
+  see a run; others get 404. Forget and the device switch end its detached runs; the switch leaves runs the device is
+  watching alone, as before. `detach` with app `tools` is refused.
+- **Background priority (8b):** `priority: "background"` waits behind interactive phone and program questions, in
+  arrival order, with its own limit of 20 waiting and a 30-minute wait limit (`background_wait_limit_min`), so it
+  never crowds out a person.
 - **8c (not approved yet):** `effort`, `GET /models`, `limits` in `/check`, and (only if the owner agrees, since points
   aren't sent to apps today) `cap_left`.
 
@@ -588,7 +596,16 @@ pictures absent from logs and usage; shaped answers and both kinds of `format` f
 `--json-schema`; the feature list; the client and the fake; Village's own ClaudeIn tests. **Not yet done:** a real run
 with pictures or a schema (tests never start one).
 
-### Phase 8b: long runs and background priority (not approved yet)
+### Phase 8b: long runs and background priority (built 2026-11-18)
+Section 4.11. The server (`detach`, `seq`, the two new routes, keeping, the 10-per-app limit), the queue (the
+background line), the service (dropping kept runs, Forget and the device switch), `claudein_client` (`detach=`,
+`priority=`, `seq` on every event, `get_run()`, `resume()`) and `FakeClaudeIn`. **Checked:** a detached run carrying
+on after its caller hangs up while a normal run still stops; replay from `seq` then live; each state of
+`GET /runs/<id>`; the 60-minute drop; the per-app limit and freeing a place; ownership (another device, a program,
+a wrong code); Forget and switch-off; the queue order, places in line, the separate waiting limits and the 30-minute
+wait; the client and the fake; Village's own ClaudeIn tests. **Not yet done:** a real phone sleeping mid-run and
+picking the run up again.
+
 ### Phase 8c: effort, models, limits, cap_left (not approved yet)
 
 ## 6. Later changes in the Signal Lab apps (belong to `signal-lab-egx`, need their own approval there)

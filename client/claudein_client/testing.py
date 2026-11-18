@@ -12,6 +12,9 @@
     fake.calls          # what each run was asked (the same fields run() sends)
     fake.tool_answers   # what the program's tools answered: (name, input, answer body)
 
+    state = await fake.get_run(run_id)              # every fake run is kept, as a detached run is
+    async for event in fake.resume(run_id, after=2): ...   # its events after number 2
+
 fake.run and fake.ask take the same arguments as claudein_client.run and ask, so a program can pass them in where
 it would pass the real ones (like Village's query_fn hook today). Unscripted runs answer "ok".
 """
@@ -21,7 +24,8 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from typing import Any, AsyncIterator
 
-from ._client import (ClaudeInUnavailable, Done, Event, Image, Result, Started, Text, Tool, ToolCall, call_handler)
+from ._client import (ClaudeInError, ClaudeInUnavailable, Done, Event, Image, Result, RunState, Started, Text, Tool,
+                      ToolCall, call_handler)
 
 
 @dataclass
@@ -41,6 +45,7 @@ class FakeClaudeIn:
         self._queue: list[_Script] = []
         self.calls: list[dict] = []
         self.tool_answers: list[tuple[str, dict, dict]] = []
+        self.runs: dict[str, list[Event]] = {}  # every run's events so far, by run id
 
     # --- scripting -----------------------------------------------------------------------------------------------
 
@@ -67,7 +72,12 @@ class FakeClaudeIn:
                   tools: list[Tool] | None = None, builtin_tools: list[str] | None = None,
                   max_turns: int | None = None, max_budget_usd: float | None = None,
                   tool_timeout_s: float | None = None, images: list[Image] | None = None,
-                  output_schema: dict | None = None) -> AsyncIterator[Event]:
+                  output_schema: dict | None = None, detach: bool = False,
+                  priority: str | None = None) -> AsyncIterator[Event]:
+        if detach and tools:
+            raise ClaudeInError(400, "\"detach\" can't be used with \"tools\".")
+        if priority not in (None, "interactive", "background"):
+            raise ClaudeInError(400, "\"priority\" must be \"interactive\" or \"background\".")
         s = self._queue.pop(0) if self._queue else _Script()
         if s.unavailable:
             raise ClaudeInUnavailable("PC not available: ClaudeIn isn't running.")
@@ -75,26 +85,50 @@ class FakeClaudeIn:
                            "tools": [t.name for t in tools or []], "builtin_tools": builtin_tools,
                            "max_turns": max_turns, "max_budget_usd": max_budget_usd,
                            "tool_timeout_s": tool_timeout_s, "images": list(images or []),
-                           "output_schema": output_schema})
+                           "output_schema": output_schema, "detach": detach, "priority": priority})
         by_name = {t.name: t for t in tools or []}
-        yield Started(f"fake-{len(self.calls)}")
+        run_id = f"fake-{len(self.calls)}"
+        log: list[Event] = []
+        self.runs[run_id] = log
+
+        def note(e: Event) -> Event:
+            e.seq = len(log) + 1
+            log.append(e)
+            return e
+
+        yield note(Started(run_id))
         messages: list[str] = []
         for i, (name, tool_input) in enumerate(s.tools, 1):
-            yield ToolCall(f"c{i}", name, tool_input)
+            yield note(ToolCall(f"c{i}", name, tool_input))
             body = await call_handler(by_name.get(name), name, tool_input)
             self.tool_answers.append((name, tool_input, body))
         if s.text:
-            yield Text(s.text)
+            yield note(Text(s.text))
             messages.append(s.text)
-        yield Done(Result(ending=s.ending, answer=s.text, messages=messages, usage=dict(s.usage),
-                          api_price_usd=0.0, turns=len(s.tools) + 1, limits=s.limits, error_kind=s.error_kind,
-                          structured=s.structured if s.ending == "done" else None))
+        yield note(Done(Result(ending=s.ending, answer=s.text, messages=messages, usage=dict(s.usage),
+                               api_price_usd=0.0, turns=len(s.tools) + 1, limits=s.limits, error_kind=s.error_kind,
+                               structured=s.structured if s.ending == "done" else None)))
 
     async def ask(self, **kwargs) -> Result:
         async for e in self.run(**kwargs):
             if isinstance(e, Done):
                 return e.result
         raise ClaudeInUnavailable("PC not available.")
+
+    async def get_run(self, run_id: str) -> RunState:
+        log = self._log(run_id)
+        done = next((e for e in log if isinstance(e, Done)), None)
+        return RunState(run_id, "done" if done else "running", done.result if done else None, 0, len(log))
+
+    async def resume(self, run_id: str, after: int = 0) -> AsyncIterator[Event]:
+        for e in list(self._log(run_id)):
+            if e.seq > after:
+                yield e
+
+    def _log(self, run_id: str) -> list[Event]:
+        if run_id not in self.runs:
+            raise ClaudeInError(404, "No such run (it ended over an hour ago, or ClaudeIn restarted).")
+        return self.runs[run_id]
 
 
 def answer_text(body: dict) -> str:

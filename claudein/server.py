@@ -81,6 +81,8 @@ class Server:
         app.router.add_get("/hello", self.hello)
         app.router.add_get("/check", self.check)
         app.router.add_post("/runs", self.start_run)
+        app.router.add_get("/runs/{id}", self.get_run)
+        app.router.add_get("/runs/{id}/events", self.run_events)
         app.router.add_post("/runs/{id}/stop", self.stop_run)
         app.router.add_post("/runs/{id}/tools/{call}", self.tool_answer)
         return app
@@ -129,15 +131,52 @@ class Server:
         return _json(200, {"ok": True, "busy": self.service.settings.paused or s.full, "queue": len(s.waiting),
                            "features": self.service.claude.features()})
 
+    def _own_run(self, c: Caller, request: web.Request) -> Run | None:
+        """The run named in the address, if this caller started it (someone else's looks the same as none)."""
+        self.service.sweep()
+        run = self.service.runs.get(request.match_info["id"])
+        return run if run is not None and c.owns(run) else None
+
     async def stop_run(self, request: web.Request) -> web.Response:
         c = await self._caller(request)
         if isinstance(c, web.Response):
             return c
-        run = self.service.runs.get(request.match_info["id"])
-        if run is None or not c.owns(run):
+        run = self._own_run(c, request)
+        if run is None:
             return _json(404, {"ok": False})
-        run.close()
+        if run.spec.detach and run.result is not None:
+            self.service.runs.pop(run.id, None)  # a kept answer the app has already read: free its place
+        else:
+            run.close()
         return _json(200, {"ok": True})
+
+    async def get_run(self, request: web.Request) -> web.Response:
+        c = await self._caller(request)
+        if isinstance(c, web.Response):
+            return c
+        run = self._own_run(c, request)
+        if run is None:
+            return _json(404, {"error": "No such run (it ended over an hour ago, or ClaudeIn restarted)."})
+        return _json(200, {"id": run.id, "state": run.state, "done": run.result, "queued_ms": run.queued_ms,
+                           "last_seq": run.last_seq})
+
+    async def run_events(self, request: web.Request) -> web.StreamResponse:
+        c = await self._caller(request)
+        if isinstance(c, web.Response):
+            return c
+        raw = request.query.get("after", "0")
+        if not raw.isdigit():
+            return _json(400, {"error": '"after" must be a whole number of 0 or more.'})
+        run = self._own_run(c, request)
+        if run is None:
+            return _json(404, {"error": "No such run (it ended over an hour ago, or ClaudeIn restarted)."})
+        resp = web.StreamResponse(headers={"Content-Type": "text/event-stream", "Cache-Control": "no-cache"})
+        try:
+            await resp.prepare(request)
+            await self._stream(resp, run, int(raw))
+        except (ConnectionError, RuntimeError):
+            pass  # a reader going away never stops the run
+        return resp
 
     async def tool_answer(self, request: web.Request) -> web.Response:
         c = await self._caller(request)
@@ -176,35 +215,50 @@ class Server:
             app_name = svc.pairings.ensure_app(aid, spec.app).name
             label = f"{app_name} (this PC)"
 
+        if spec.detach and svc.detached_count(aid) >= runs.MAX_DETACHED_PER_APP:
+            return _json(429, {"error": f"{app_name} already has {runs.MAX_DETACHED_PER_APP} long runs kept on the "
+                                        "PC. Wait for one to finish, or stop one you have read."})
+
         run = Run(spec, aid, app_name, c.device.id if c.device else None, label, c.is_phone)
         svc.runs[run.id] = run
 
         resp = web.StreamResponse(headers={"Content-Type": "text/event-stream", "Cache-Control": "no-cache"})
         try:
             await resp.prepare(request)
-            await self._send(resp, {"type": "run", "id": run.id})
             if not svc.pairings.model_allowed(aid, spec.model):
                 run.finish(runs.done(f"failed: {app_name} isn't allowed to use {spec.model}.",
                                      error_kind="not_allowed"))
                 svc.run_finished(run)
             else:
                 svc.scheduler.submit(run)
-            while True:
-                try:
-                    e = await asyncio.wait_for(run.events.get(), KEEPALIVE_S)
-                except asyncio.TimeoutError:
-                    await resp.write(b": still working\n\n")
-                    continue
+            await self._stream(resp, run, 0)
+        except (ConnectionError, RuntimeError):
+            if spec.detach:
+                log.info("A caller went away; its run carries on (detached).")
+            else:
+                log.info("A caller went away; its run is stopped.")
+        finally:
+            if not spec.detach:
+                if run.result is None:  # the caller went away (or was cancelled) before the end: stop the run
+                    run.close()
+                svc.runs.pop(run.id, None)
+            # a detached run stays in svc.runs until an hour after it ends (Service.sweep)
+        return resp
+
+    async def _stream(self, resp: web.StreamResponse, run: Run, after: int) -> None:
+        """Sends [run]'s events after [after], then new ones as they come, until its done event."""
+        sent = after
+        while True:
+            while sent < len(run.log):
+                e = run.log[sent]
+                sent += 1
                 await self._send(resp, e)
                 if e.get("type") == "done":
-                    break
-        except (ConnectionError, RuntimeError):
-            log.info("A caller went away; its run is stopped.")
-        finally:
-            if run.result is None:  # the caller went away (or was cancelled) before the end: stop the run
-                run.close()
-            svc.runs.pop(run.id, None)
-        return resp
+                    return
+            if run.result is not None and sent >= len(run.log):
+                return  # asked for events after the done event: nothing more will come
+            if not await run.wait_past(sent, KEEPALIVE_S):
+                await resp.write(b": still working\n\n")
 
     @staticmethod
     async def _send(resp: web.StreamResponse, event: dict) -> None:

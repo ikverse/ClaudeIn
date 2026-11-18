@@ -133,6 +133,27 @@ async for event in claudein_client.run(app="my-app", model="claude-opus-5-5", sy
 
 Leaving the loop early (`break`, then `aclose()`), or cancelling the task, stops the run on the PC too.
 
+### Long jobs that shouldn't stop when your program does
+
+```python
+stream = claudein_client.run(app="my-app", model="claude-opus-5-5", system="...", prompt="...",
+                             detach=True, priority="background")
+started = await stream.__anext__()             # Started: keep started.run_id (and the last .seq you saw)
+await stream.aclose()                          # the run carries on on the PC
+
+state = await claudein_client.get_run(started.run_id)    # later: "waiting", "running" or "done"
+if state.state == "done":
+    print(state.result.answer)
+else:
+    async for event in claudein_client.resume(started.run_id, after=started.seq):
+        ...                                    # the rest of the run, ending with Done
+```
+
+- `detach=True` can't be used with your own `tools` (nobody would answer them). Built-in web tools are fine.
+- A finished detached run is kept for an hour, and only in memory: a ClaudeIn restart loses it (`get_run` then
+  raises `ClaudeInError` 404). At most 10 per app; stop one you've read to free its place.
+- `priority="background"` waits behind every person's question, up to 30 minutes. Use it for scheduled or batch work.
+
 ### What the result holds
 
 | Field | Meaning |
@@ -207,6 +228,21 @@ Fields, limits, events and pictures in tool answers are all in [`protocol.md`](p
 schema goes in `"output_schema"`, and the parsed answer comes back as `structured` in `done`. Details in
 [`protocol.md`](protocol.md), section 2.
 
+### Phone apps doing long jobs
+
+A phone app that starts work taking minutes (a batch of screenshots, a scheduled analysis) should not depend on the
+connection staying open: phones sleep, switch networks and kill apps in the background. Send
+`"detach": true, "priority": "background"` (check `features` for `"detach"` and `"priority"` first):
+
+1. Keep the run id from the first event, and the `seq` of the last event you handled.
+2. If the stream breaks, call `GET /runs/<id>/events?after=<seq>` to carry on from there, or `GET /runs/<id>` to see
+   whether it has finished and read its `done`.
+3. A 404 means the run is gone (finished over an hour ago, or ClaudeIn restarted): ask again.
+4. Once you have the answer, `POST /runs/<id>/stop` frees its place (10 per app).
+
+Detached runs can't use the app's own `tools`. Interactive questions from a person should stay `"interactive"` (the
+default) so they go ahead of background work.
+
 ## Step 3: handle every way a run can end
 
 A run always ends with one `done` event (the Python client turns it into `Result`). ClaudeIn's own refusals are
@@ -231,7 +267,8 @@ And before any run starts:
 - **400** - your request is wrong (the body says what). Fix the code.
 - **401** - wrong code or token. Phones: ask the owner to pair again. Programs: re-read `local.json` once.
 - **403** - this device is switched off, or `app` doesn't match the pairing.
-- **429** - too many wrong codes from this address; blocked for an hour.
+- **429** - too many wrong codes from this address (blocked for an hour), or, with `detach`, your app already has 10
+  detached runs kept on the PC (the `error` text says which).
 
 ## Rules every connected app follows
 
@@ -249,9 +286,9 @@ And before any run starts:
 6. **Keep secrets out of prompts and tool answers** unless Claude really needs them. ClaudeIn never logs prompts,
    answers or tool data, but they do reach Claude.
 7. **Don't store the pairing code or token anywhere the user can't control**, and never in logs.
-8. **Be patient.** A run may wait in line (you'll get `working` events), and phone questions go ahead of program
-   questions. ClaudeIn itself ends a run that waits more than 10 minutes
-   or runs more than 15, so don't cut a run off sooner on your side.
+8. **Be patient.** A run may wait in line (you'll get `working` events): phone questions go ahead of program
+   questions, and both go ahead of `background` runs. ClaudeIn itself ends a run that waits more than 10 minutes
+   (30 for background runs) or runs more than 15, so don't cut a run off sooner on your side.
 
 ## A block to paste into your project's `CLAUDE.md`
 
@@ -281,6 +318,8 @@ Claude, read `<path to ClaudeIn>\docs\connecting-an-app.md`.
 - [ ] Tool handlers answer within `tool_timeout_s`, and errors in them don't crash the app.
 - [ ] `working` events are shown while the run waits or searches.
 - [ ] The person can stop a long run (`/stop`, or leaving the `run()` loop).
+- [ ] Long or scheduled jobs use `detach` + `priority: "background"`, keep the run id and last `seq`, pick the run up
+      again after a dropped connection, and handle a 404 (gone) and a 429 (10 kept runs) calmly.
 - [ ] Apps that send pictures or ask for a set shape check `features` first (phone apps), keep pictures within 20 and
       5 MB each, and handle `error_kind: "format"`.
 - [ ] Tests use `FakeClaudeIn` (or a fake server) and pass without ClaudeIn running.
