@@ -491,7 +491,7 @@ class ClaudePage(Page):
 
 class DevicesPage(Page):
     def __init__(self, svc: "Service", open_pairing: Callable[[], None]):
-        super().__init__("devices", "Devices")
+        super().__init__("devices", "Connected apps")
         self.svc = svc
         pair = PrimaryPushButton(FluentIcon.ADD, "Pair a device")
         pair.clicked.connect(open_pairing)
@@ -515,21 +515,27 @@ class DevicesPage(Page):
             by_app.setdefault(d.app_id, []).append(d)
         app_ids = list(dict.fromkeys(list(by_app) + [a for a in p.apps if a != "claudein"]))
         if not app_ids:
-            self.list.addWidget(BodyLabel("Nothing paired yet. Press “Pair a device” to add a phone."))
+            self.list.addWidget(BodyLabel("No apps connected yet. Press “Pair a device” to connect an app on a phone."))
         for aid in app_ids:
-            self.list.addSpacing(8)
-            self.list.addWidget(SubtitleLabel(p.app_name(aid)))
+            devices = by_app.get(aid, [])
+            card = SimpleCardWidget()
+            cv = QVBoxLayout(card)
+            cv.setContentsMargins(16, 14, 16, 16)
+            cv.setSpacing(8)
+            cv.addWidget(SubtitleLabel(p.app_name(aid)))
+            n = len(devices)
+            cv.addWidget(CaptionLabel(f"{n} device{'' if n == 1 else 's'}" if n else "Program on this PC"))
+            self.list.addWidget(card)
             models = LineEdit()
             models.setPlaceholderText("Any model")
             models.setText(", ".join(p.apps[aid].models) if aid in p.apps else "")
             models.setFixedWidth(300)
             models.editingFinished.connect(lambda a=aid, w=models: self._save_models(a, w.text()))
-            self.list.addWidget(row(FluentIcon.SETTING, "Allowed models",
-                                    "Model ids separated by commas, such as claude-opus-5-5. Empty means any model.",
-                                    models))
-            devices = by_app.get(aid, [])
+            cv.addWidget(row(FluentIcon.SETTING, "Allowed models",
+                             "Model ids separated by commas, such as claude-opus-5-5. Empty means any model.",
+                             models))
             if not devices:
-                self.list.addWidget(row(FluentIcon.HOME, f"{p.app_name(aid)} (this PC)",
+                cv.addWidget(row(FluentIcon.HOME, f"{p.app_name(aid)} (this PC)",
                                         "A program on this PC. It uses the local token instead of a pairing.", None))
             for d in devices:
                 sw = SwitchButton()
@@ -545,7 +551,7 @@ class DevicesPage(Page):
                 hb.addWidget(sw)
                 hb.addWidget(forget)
                 used = f"last used {when(d.last_used)}" if d.last_used else "not used yet (the code expires 30 minutes after pairing)"
-                self.list.addWidget(row(FluentIcon.PHONE, d.label, f"Paired {when(d.created)} · {used}", box))
+                cv.addWidget(row(FluentIcon.PHONE, d.device, f"Paired {when(d.created)} · {used}", box))
 
     def _save_models(self, aid: str, text: str) -> None:
         self.svc.pairings.set_models(aid, text.replace(";", ",").split(","))
@@ -1043,7 +1049,7 @@ class SettingsWindow(GlassMixin, FluentWindow):
         self.general = GeneralPage(svc, restart, quit_)
         self.addSubInterface(self.home, FluentIcon.HOME, "Home")
         self.addSubInterface(self.claude, FluentIcon.ROBOT, "Claude")
-        self.addSubInterface(self.devices, FluentIcon.PHONE, "Devices")
+        self.addSubInterface(self.devices, FluentIcon.APPLICATION, "Connected apps")
         self.addSubInterface(self.usage, FluentIcon.PIE_SINGLE, "Usage")
         self.addSubInterface(self.caps, FluentIcon.SPEED_OFF, "Caps")
         self.addSubInterface(self.general, FluentIcon.SETTING, "General", NavigationItemPosition.BOTTOM)
