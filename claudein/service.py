@@ -186,6 +186,24 @@ class Service:
     def problems(self) -> list[str]:
         return list(self.start_problems) + self.claude.problems()
 
+    # --- phone access (phase 4) ----------------------------------------------------------------------------------------
+
+    async def phone_access(self) -> "PhoneAccess":
+        """The "Phone access" check: Tailscale, the firewall rule and port 8790. Reads only; changes nothing."""
+        from . import firewall, tailscale
+
+        port = self.phone_port or self.settings.phone_port
+        ts, rule = await asyncio.gather(asyncio.to_thread(tailscale.status), asyncio.to_thread(firewall.check, port))
+        return PhoneAccess(ts, rule, port, listening=self.phone_port is not None)
+
+    async def set_up_phone_access(self) -> str:
+        """Adds the firewall rule. Windows asks the owner first. Returns "done", "cancelled" or "failed"."""
+        from . import firewall
+
+        result = await asyncio.to_thread(firewall.set_up, self.phone_port or self.settings.phone_port)
+        self.log.info("Phone access set-up: %s", result)
+        return result
+
     # --- Claude Code and the account (the Claude page and the panel call these) ----------------------------------------
 
     async def recheck_claude(self) -> None:
@@ -230,6 +248,42 @@ class Service:
 
         backup.restore(self.folder, path)
         self.pairings.load()
+
+
+class PhoneAccess:
+    """What the "Phone access" check found, as plain lines."""
+
+    def __init__(self, ts, rule, port: int, listening: bool):
+        self.ts, self.rule, self.port, self.listening = ts, rule, port, listening
+
+    @property
+    def lines(self) -> list[tuple[bool, str]]:
+        ts, rule = self.ts, self.rule
+        if ts.on:
+            t = (True, f"Tailscale is on. This PC is {ts.name or 'on Tailscale'} at {ts.addresses[0]}.")
+        elif ts.state == "missing":
+            t = (False, "Tailscale isn't installed. Phones can reach ClaudeIn only at home.")
+        else:
+            t = (False, "Tailscale is off. Phones can reach ClaudeIn only at home. Turn Tailscale on.")
+        if rule.state == "ok":
+            f = (True, f"The firewall rule is there (port {self.port}, Tailscale and home network only).")
+        elif rule.state == "off":
+            f = (False, "The firewall rule is turned off.")
+        elif rule.state == "different":
+            f = (False, f"The firewall rule needs setting up again: {rule.detail}.")
+        else:
+            f = (False, "The firewall rule isn't set up yet." + (f" ({rule.detail})" if rule.detail else ""))
+        p = ((True, f"ClaudeIn is listening for phones on port {self.port}.") if self.listening else
+             (False, f"ClaudeIn isn't listening on port {self.port}. Another program may be using it."))
+        return [t, f, p]
+
+    @property
+    def needs_rule(self) -> bool:
+        return self.rule.state != "ok"
+
+    @property
+    def all_ok(self) -> bool:
+        return all(ok for ok, _ in self.lines)
 
 
 def lan_addresses() -> list[str]:

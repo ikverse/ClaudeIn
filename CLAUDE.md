@@ -3,8 +3,9 @@
 ClaudeIn is a tray program on the owner's Windows PC. It lets the owner's apps (Signal Lab crypto and Signal Lab EGX on
 Android, Village in `..\PlatformExperimental`, and future apps) use Claude through Claude Code, signed in with the
 Claude account the owner picks (browser sign-in inside ClaudeIn), with no API keys. The full plan is in `docs/plan.md`.
-Started 2026-11-15. Phases 1, 2, 3 (client library), 5a (sign-in, finding Claude Code, the update guard) and 5b
-(`ClaudeIn-Setup.exe`, built with `Build-Installer.bat`) are built. Phase 4 (away from home, the firewall rule) is not.
+Started 2026-11-15. Phases 1, 2, 3 (client library), 4 (away from home: Tailscale address, the firewall rule, the
+"Phone access" check), 5a (sign-in, finding Claude Code, the update guard) and 5b (`ClaudeIn-Setup.exe`, built with
+`Build-Installer.bat`) are built. The broad "Python" firewall rules stay because Village shares that Python.
 
 ## Working rules
 

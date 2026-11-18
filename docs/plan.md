@@ -440,7 +440,13 @@ question starts). Waiting on the owner's hand check 8.
   - `demo_run.py` (plain `claude -p` with file tools in a throwaway folder) **keeps calling Claude Code directly** (owner,
     2026-11-15). It is a sandboxed job, not a question, and it doesn't show in ClaudeIn's usage.
 
-### Phase 4: away from home
+### Phase 4: away from home (built 2026-11-18)
+- **Found while building (owner, 2026-11-18):** the `.venv` Python hands off to the shared `C:\Python314\pythonw.exe`,
+  which is the program Windows Firewall sees, and Village uses the same one. So the rule is for that program (or
+  `ClaudeIn.exe` when installed), and **the broad "Python" rules are left alone** so Village's phone page on 8765 keeps
+  working. Tightening those needs a matching rule for Village, which goes through Village's own project. The set-up
+  does remove Windows' wide "claudein.exe" rules. Where it is: `claudein/tailscale.py`, `claudein/firewall.py`, the
+  "Phone access" card in Settings → General (also opened from the tray menu and the panel's "Phones" button).
 - **The owner installs or signs up for, themselves:**
   - Tailscale on the PC (likely already there, since Village's phone page uses it)
   - the Tailscale app on each phone, signed in to the same Tailscale account

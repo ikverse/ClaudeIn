@@ -79,6 +79,7 @@ class Panel(AcrylicWindow):
         v.addWidget(HorizontalSeparator())
         bottom = QHBoxLayout()
         for icon_, text, action in ((FluentIcon.ADD, "Pair", open_pairing),
+                                    (FluentIcon.PHONE, "Phones", lambda: open_settings("phones")),
                                     (FluentIcon.PIE_SINGLE, "Usage", lambda: open_settings("usage")),
                                     (FluentIcon.SETTING, "Settings", lambda: open_settings("home"))):
             b = TransparentPushButton(icon_, text)

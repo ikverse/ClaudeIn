@@ -27,7 +27,7 @@ from qfluentwidgets import (BodyLabel, CaptionLabel, ComboBox, EditableComboBox,
                             SimpleCardWidget, StrongBodyLabel, SubtitleLabel, SwitchButton, TableWidget,
                             TitleLabel, isDarkTheme)
 
-from . import autostart, tls
+from . import autostart, tailscale, tls
 from .claudecode import INSTALL_PAGE, KNOWN_GOOD, safe_link
 from .pairing import shown
 from .service import lan_addresses
@@ -753,6 +753,20 @@ class GeneralPage(Page):
                              "Starts ClaudeIn when you sign in, and again within a minute if it ever stops without "
                              "Quit.", self.autostart))
 
+        self.phone_check_b = PushButton(FluentIcon.SYNC, "Check")
+        self.phone_check_b.clicked.connect(lambda: asyncio.ensure_future(self.check_phones()))
+        self.phone_setup_b = PrimaryPushButton(FluentIcon.CERTIFICATE, "Set up phone access")
+        self.phone_setup_b.clicked.connect(lambda: asyncio.ensure_future(self._set_up_phones()))
+        self.phone_setup_b.hide()
+        pbox = QWidget()
+        pb = QHBoxLayout(pbox)
+        pb.setContentsMargins(0, 0, 0, 0)
+        pb.addWidget(self.phone_setup_b)
+        pb.addWidget(self.phone_check_b)
+        self.phone_card = row(FluentIcon.PHONE, "Phone access",
+                              "Press Check to see whether phones can reach this PC at home and away.", pbox)
+        self.v.addWidget(self.phone_card)
+
         self.awake = SwitchButton()
         self.awake.setOnText("On")
         self.awake.setOffText("Off")
@@ -802,6 +816,41 @@ class GeneralPage(Page):
             w.blockSignals(True)
             w.setChecked(value)
             w.blockSignals(False)
+
+    async def check_phones(self) -> None:
+        """The "Phone access" check: three plain lines, and the set-up button if the firewall rule is missing."""
+        self.phone_check_b.setEnabled(False)
+        self.phone_check_b.setText("Checking…")
+        try:
+            pa = await self.svc.phone_access()
+        finally:
+            self.phone_check_b.setEnabled(True)
+            self.phone_check_b.setText("Check")
+        self.phone_card.caption.setText("\n".join(("✓ " if ok else "✗ ") + text for ok, text in pa.lines))
+        self.phone_setup_b.setVisible(pa.needs_rule)
+
+    async def _set_up_phones(self) -> None:
+        box = MessageBox("Set up phone access?",
+                         "ClaudeIn adds one Windows Firewall rule: phones may reach port "
+                         f"{self.svc.phone_port or self.svc.settings.phone_port}, only from Tailscale and your home "
+                         "network, and only to ClaudeIn. It also removes the older, wider ClaudeIn rules.\n\n"
+                         "Windows will ask for permission. Click Yes.", self.window())
+        box.yesButton.setText("Continue")
+        box.cancelButton.setText("Cancel")
+        if not box.exec():
+            return
+        self.phone_setup_b.setEnabled(False)
+        try:
+            result = await self.svc.set_up_phone_access()
+        finally:
+            self.phone_setup_b.setEnabled(True)
+        if result == "done":
+            self._info(True, "Phone access set up", "The firewall rule is in place.")
+        elif result == "cancelled":
+            self._info(False, "Not set up", "Windows' question was answered No, so nothing changed.")
+        else:
+            self._info(False, "Couldn't set up phone access", "Windows Firewall refused the change.")
+        await self.check_phones()
 
     def _info(self, ok: bool, title: str, text: str) -> None:
         (InfoBar.success if ok else InfoBar.error)(title, text, duration=6000 if ok else -1,
@@ -909,6 +958,11 @@ class SettingsWindow(GlassMixin, FluentWindow):
         self.raise_()
         self.activateWindow()
 
+    def open_phone_access(self) -> None:
+        """From the tray: the General page, with the "Phone access" check already running."""
+        self.open("general")
+        asyncio.ensure_future(self.general.check_phones())
+
     def refresh(self) -> None:
         if self.isVisible():
             w = self.stackedWidget.currentWidget()
@@ -916,10 +970,22 @@ class SettingsWindow(GlassMixin, FluentWindow):
                 w.refresh()
 
 
-def qr_payload(addresses: list[str], port: int, code: str, fingerprint: str) -> str:
-    """What the pairing QR code holds, for when the apps learn to scan it."""
-    return json.dumps({"claudein": 1, "addresses": addresses, "port": port, "code": shown(code),
-                       "fingerprint": fingerprint}, separators=(",", ":"))
+def qr_payload(addresses: list[str], port: int, code: str, fingerprint: str, name: str | None = None) -> str:
+    """What the pairing QR code holds, for when the apps learn to scan it. The Tailscale address comes first."""
+    data = {"claudein": 1, "addresses": addresses, "port": port, "code": shown(code), "fingerprint": fingerprint}
+    if name:
+        data["name"] = name  # the PC's Tailscale name
+    return json.dumps(data, separators=(",", ":"))
+
+
+def address_text(ts: "tailscale.Tailscale", home: list[str], port: int) -> str:
+    """The addresses to type, Tailscale's first: it works at home and away, so a phone needs only that one."""
+    lines = [f"{a}:{port}   ← works at home and away (use this one)" for a in (ts.addresses if ts.on else [])]
+    lines += [f"{a}:{port}   home only" for a in home]
+    if not ts.on:
+        lines.append("Tailscale isn't installed on this PC, so phones work only at home." if ts.state == "missing"
+                     else "Tailscale is off, so phones work only at home. Turn it on for an address that works away.")
+    return "\n".join(lines) or f"(this PC's address):{port}"
 
 
 def qr_pixmap(text: str, size: int = 184) -> QPixmap:
@@ -981,6 +1047,7 @@ class PairWindow(GlassMixin, FluentWidget):
         left.setSpacing(4)
         left.addWidget(StrongBodyLabel("Address"))
         self.address = BodyLabel("")
+        self.address.setWordWrap(True)
         self.address.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByMouse)
         left.addWidget(self.address)
         left.addSpacing(6)
@@ -1043,12 +1110,15 @@ class PairWindow(GlassMixin, FluentWidget):
         dev, code = self.svc.pair(app_name, device)
         self.device_id = dev.id
         port = self.svc.phone_port or self.svc.settings.phone_port
-        addrs = lan_addresses()
+        ts = tailscale.status()
+        home = [a for a in lan_addresses() if not tailscale.is_tailscale(a)]
+        addrs = (ts.addresses if ts.on else []) + home
         self.for_whom.setText(dev.label)
-        self.address.setText("\n".join(f"{a}:{port}" for a in addrs) or f"(this PC's address):{port}")
+        self.address.setText(address_text(ts, home, port))
         self.code.setText(shown(code))
         self.fp.setText(f"The app should show a certificate ending in {tls.short_fingerprint(self.svc.folder)}.")
-        self.qr.setPixmap(qr_pixmap(qr_payload(addrs, port, code, tls.fingerprint(self.svc.folder))))
+        self.qr.setPixmap(qr_pixmap(qr_payload(addrs, port, code, tls.fingerprint(self.svc.folder),
+                                               name=ts.full_name if ts.on else None)))
         self.ask.hide()
         self.result.show()
         self.refresh()

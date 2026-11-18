@@ -104,6 +104,7 @@ class Tray(QObject):
         self.menu.addAction(Action(FluentIcon.HOME, "Open ClaudeIn", triggered=lambda: self.open_settings("home")))
         self.pause_action = Action(FluentIcon.PAUSE, "Pause all", triggered=self._toggle_pause)
         self.menu.addAction(self.pause_action)
+        self.menu.addAction(Action(FluentIcon.PHONE, "Phone access", triggered=lambda: self.open_settings("phones")))
         self.menu.addSeparator()
         self.menu.addAction(Action(FluentIcon.CLOSE, "Quit", triggered=quit_))
         self.icon.setContextMenu(self.menu)
@@ -140,7 +141,10 @@ class Tray(QObject):
             self.panel.toggle(self.icon.geometry())
 
     def open_settings(self, page: str = "home") -> None:
-        self.settings.open(page)
+        if page == "phones":
+            self.settings.open_phone_access()
+        else:
+            self.settings.open(page)
 
     def open_pairing(self) -> None:
         self.pairing.start()
