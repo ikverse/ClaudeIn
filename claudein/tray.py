@@ -96,7 +96,10 @@ class Tray(QObject):
         self.svc = svc
         self.icons = {s: icon_for(s) for s in COLOURS}
         self.icon = QSystemTrayIcon(self.icons["normal"])
-        self.settings = SettingsWindow(svc, self.open_pairing, restart, self.icons["normal"])
+        self.settings = SettingsWindow(svc, self.open_pairing, restart, self.icons["normal"], quit_)
+        self._announced: str | None = None  # the update version already shown in a notice
+        self._balloon_page: str | None = None  # what clicking the notice opens
+        self.icon.messageClicked.connect(lambda: self._balloon_page and self.open_settings(self._balloon_page))
         self.pairing = PairWindow(svc, self.icons["normal"])
         self.panel = Panel(svc, self.icons["normal"], self.open_settings, self.open_pairing)
 
@@ -132,6 +135,11 @@ class Tray(QObject):
             self.panel.refresh()
         self.settings.refresh()
         self.pairing.refresh()
+        r = self.svc.updates.available
+        if r is not None and self.svc.updates.status.state == "available" and r.version != self._announced:
+            self._announced = r.version  # once per version
+            self.balloon(f"ClaudeIn {r.version} is available. Click here, or open ClaudeIn, General, to install it.",
+                         page="general")
 
     def _toggle_pause(self) -> None:
         self.svc.scheduler.set_paused(not self.svc.settings.paused)
@@ -149,7 +157,8 @@ class Tray(QObject):
     def open_pairing(self) -> None:
         self.pairing.start()
 
-    def balloon(self, text: str) -> None:
+    def balloon(self, text: str, page: str | None = None) -> None:
+        self._balloon_page = page
         self.icon.showMessage("ClaudeIn", text, self.icons["normal"], 5000)
 
     def hide(self) -> None:

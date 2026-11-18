@@ -47,12 +47,20 @@ Name: "{userstartup}\ClaudeIn"; Filename: "{app}\ClaudeIn.exe"; Tasks: startup
 ; --setup adds the restart task when the Startup shortcut exists, and refreshes the shortcuts' icon.
 Filename: "{app}\ClaudeIn.exe"; Parameters: "--setup"; Flags: runhidden waituntilterminated; Tasks: menuicon startup
 Filename: "{app}\ClaudeIn.exe"; Description: "Start ClaudeIn now"; Flags: nowait postinstall skipifsilent
+; An update started by ClaudeIn itself (/UPDATE=1, quiet): start the new ClaudeIn again when done.
+Filename: "{app}\ClaudeIn.exe"; Flags: nowait; Check: IsUpdate
 
 [UninstallRun]
 Filename: "{app}\ClaudeIn.exe"; Parameters: "--remove-startup"; Flags: runhidden waituntilterminated; RunOnceId: "RemoveStartup"
 Filename: "{sys}\taskkill.exe"; Parameters: "/F /IM ClaudeIn.exe"; Flags: runhidden waituntilterminated; RunOnceId: "StopClaudeIn"
 
 [Code]
+// True when ClaudeIn started this installer to update itself (it passes /UPDATE=1).
+function IsUpdate: Boolean;
+begin
+  Result := ExpandConstant('{param:update|0}') = '1';
+end;
+
 // Before files are replaced (an update), stop a running ClaudeIn. The quit flag keeps its "start again within a minute"
 // task from bringing it back in the middle of the update; the next normal start clears the flag.
 function PrepareToInstall(var NeedsRestart: Boolean): String;

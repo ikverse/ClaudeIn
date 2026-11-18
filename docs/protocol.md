@@ -27,7 +27,7 @@ Every route except `/hello` needs the `Authorization` header. Bodies are JSON in
 ### `GET /hello`
 No code needed. A device reads the certificate here while pairing.
 ```json
-{"app": "Signal Lab analyst host", "protocol": 1, "claude": "2.1.325", "service": "ClaudeIn", "version": "0.1.0"}
+{"app": "Signal Lab analyst host", "protocol": 1, "claude": "2.1.325", "service": "ClaudeIn", "version": "0.2.0"}
 ```
 `app` keeps the Kotlin host's name until both phone apps also accept `"ClaudeIn"`. New apps should look at `service`.
 `claude` is missing when its version is unknown.

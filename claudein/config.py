@@ -7,7 +7,7 @@ import os
 from dataclasses import asdict, dataclass, fields
 from pathlib import Path
 
-VERSION = "0.1.0"
+VERSION = "0.2.0"
 
 #: What /hello says as "app". Today's phones only accept this name (plan 4.2).
 HELLO_APP = "Signal Lab analyst host"
@@ -41,6 +41,7 @@ class Settings:
     paused: bool = False
     own_login: bool = True  # ClaudeIn keeps its own Claude login (.claudein\claude), apart from the terminal's
     claude_copy: str = "pc"  # "pc": the Claude Code installed on this PC; "own": the copy ClaudeIn downloaded for itself
+    check_updates: bool = True  # look for a newer ClaudeIn on GitHub now and then (installing always needs a click)
 
     def clamp(self) -> "Settings":
         self.workers = max(1, min(4, int(self.workers)))

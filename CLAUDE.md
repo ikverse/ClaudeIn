@@ -36,6 +36,10 @@ Started 2026-11-15. Phases 1, 2, 3 (client library), 4 (away from home: Tailscal
     normal Claude browser sign-in. **Claude Code is installed separately, not bundled.** ClaudeIn keeps its own login by
     default. It must never crash because Claude Code updated (the guard, `docs/plan.md` 4.9). Phase 5a first, then 5b
     (the installer), each approved on its own.
+12. (2026-11-18) Installed copies update from the **GitHub Releases of `ikverse/ClaudeIn`** (public). The installer is a
+    release file, never committed. Updates install only on the owner's click and only with a valid signature from the
+    owner's key (`%USERPROFILE%\.claudein-release\signing-key.pem`, never in the project or on GitHub). Releases are made
+    with `Release.bat`; publishing one is always the owner's call (`docs/plan.md` 4.10, phase 6).
 
 ## Fixed technical choices (from the plan)
 

@@ -21,6 +21,7 @@ from .runner import QueryFn, Runner
 from .runs import Run
 from .scheduler import Scheduler
 from .server import Server
+from .updates import Updater
 from .usage import Usage, log_run, setup_logs
 
 CLAUDE_RECHECK_S = 15 * 60  # how often Claude Code and the account are looked at again (free, no question)
@@ -28,7 +29,8 @@ CLAUDE_RECHECK_S = 15 * 60  # how often Claude Code and the account are looked a
 
 class Service:
     def __init__(self, folder: Path | None = None, query_fn: QueryFn | None = None,
-                 on_change: Callable[[], None] | None = None, claude: ClaudeCode | None = None):
+                 on_change: Callable[[], None] | None = None, claude: ClaudeCode | None = None,
+                 updater: Updater | None = None):
         self.folder = folder or config.home()
         self.settings = config.Settings.load(self.folder)
         self.log = setup_logs(self.folder)
@@ -43,6 +45,8 @@ class Service:
         self.claude.attach(self.settings, self.changed)
         self.runner = Runner(query_fn, claude=self.claude)
         self._claude_watch: asyncio.Task | None = None
+        self.updates = updater or Updater(self.folder, self.settings, self.changed)
+        self._update_watch: asyncio.Task | None = None
         self.runs: dict[str, Run] = {}
         self.scheduler = Scheduler(self.settings, self.runner.execute, on_finished=self.run_finished,
                                    on_change=self.changed, over_cap=self.over_cap)
@@ -91,7 +95,9 @@ class Service:
         await self.claude.refresh()  # free: no question is asked; first, so a busy port can't skip it
         if self._claude_watch is None:
             self._claude_watch = asyncio.create_task(self._watch_claude())
-        pport = self.settings.phone_port if phone_port is None else phone_port
+        if self._update_watch is None:  # a minute from now, then every 12 hours, while the switch is on
+            self._update_watch = asyncio.create_task(self.updates.watch())
+        pport =self.settings.phone_port if phone_port is None else phone_port
         lport = self.settings.local_port if local_port is None else local_port
         ctx = tls.server_context(self.folder) if use_tls else None
 
@@ -127,6 +133,8 @@ class Service:
     async def stop(self) -> None:
         if self._claude_watch is not None:
             self._claude_watch.cancel()
+        if self._update_watch is not None:
+            self._update_watch.cancel()
         self.claude.cancel_sign_in()
         await self.scheduler.shutdown()
         for r in self._runners:

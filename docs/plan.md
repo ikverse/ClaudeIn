@@ -3,7 +3,8 @@
 Status (2026-11-15): **phase 1 built** (a phone has paired; a phone question through ClaudeIn not yet confirmed) and
 **phase 2 built**; **phase 3's client library built** (the Village move waits for Village's project); **phase 5a built**
 (2026-11-18: sign in with Claude from inside ClaudeIn, finding the Claude Code installed on the PC, and the guard against
-Claude Code updates; section 4.9) and **phase 5b built** (2026-11-18: `ClaudeIn-Setup.exe`, see phase 5b below). Written 2026-11-15. Every phase below needs its own "approve" before any code is
+Claude Code updates; section 4.9), **phase 5b built** (2026-11-18: `ClaudeIn-Setup.exe`, see phase 5b below) and
+**phase 6 built** (2026-11-18: updates from the GitHub releases, section 4.10; no release published yet). Written 2026-11-15. Every phase below needs its own "approve" before any code is
 written (see `CLAUDE.md`).
 
 ## 1. What ClaudeIn is, in plain words
@@ -396,6 +397,41 @@ checked (it needs gpg); the Windows signature covers authenticity.
 **The limit.** A future update could change something the check can't see (for example a hidden flag), and ClaudeIn would
 only learn it when runs fail. The owner then gets a clear message and the safety-net button, not a crash.
 
+### 4.10 Updates from GitHub releases (phase 6)
+
+**Decision (owner, 2026-11-18):** installed copies update from the **GitHub Releases of `ikverse/ClaudeIn`** (the main,
+public repository). The installer is attached to each release, never committed to git. A separate repository would not
+make the source any less public, and the update source must be public anyway (a private one would need a token inside
+every copy, which anyone could take out).
+
+**Checking** (`claudein/updates.py`): GitHub's public "latest release" address, no login, a minute after start, then every
+12 hours, while General's "Check for updates automatically" is on (on by default); also "Check now". It sends only
+"ClaudeIn/<version>". Drafts, pre-releases, older or equal versions, and releases without a signed installer are ignored.
+No releases yet, GitHub's rate limit (60 an hour per network) or no internet only show a quiet line on the General page.
+
+**Telling:** one tray notice per new version (clicking it opens General) and General's Updates card with the release notes
+and **Install <version>**. Nothing installs without that click.
+
+**Installing:** only from `https://github.com/ikverse/ClaudeIn/releases/download/…`, and only in the installed
+`ClaudeIn.exe` (a `.venv` copy is updated with git). It downloads the installer and its `.sig` to `.claudein\updates\`
+(keeping only that one), checks the **Ed25519 signature** against the public key in `claudein/update_key.py`, then starts
+the installer quietly (`/SILENT /UPDATE=1`) and quits. The installer stops any ClaudeIn left, keeps the earlier Start menu
+and startup choices, and with `/UPDATE=1` starts the new ClaudeIn when it is done. The signature covers
+`"ClaudeIn <version>\n<sha256 of the installer>\n"`, so a changed file and an older signed installer under a newer name
+are both refused. Getting into the GitHub account is not enough to push a bad update; the private key is also needed.
+
+**The signing key:** made once by `packaging\make_signing_key.py`. The private key is
+`%USERPROFILE%\.claudein-release\signing-key.pem`, outside the project and never in git; it is never replaced. **Keep a
+private backup.** If it is stolen, its holder can sign updates every copy will install; if it is lost, copies already out
+there won't accept new updates and need one manual install of a version with a new key.
+
+**Releasing:** `Release.bat 0.3.0 "What changed"` (`packaging\release.py`). It checks: master, no uncommitted changes,
+version not lower and tag unused, the key matches `update_key.py`, `gh` signed in. It sets the version, runs the tests,
+commits "Release 0.3.0", builds, signs, tags, pushes master and the tag, and creates the release with the installer and
+its signature. `--dry-run` does everything but tag, push and publish.
+
+**First updater version:** 0.2.0. Copies on 0.1.0 have no updater and need one manual install.
+
 ## 5. Phases (each approved on its own)
 
 ### Phase 1: the service (tray, pairing, queue, usage), compatible with today's phones
@@ -487,6 +523,14 @@ wrapped by Inno Setup 6 (`packaging\ClaudeIn.iss`).
 - **Checked:** a real silent install into a temporary folder, the installed program answering `/hello` and finding Claude
   Code, and a silent uninstall, with the real shortcuts, task and running ClaudeIn untouched.
 
+### Phase 6: updates from GitHub releases (built 2026-11-18)
+Section 4.10: the checker and Updates card, the tray notice, the signed download and quiet reinstall, the installer's
+restart after an update, the signing key and `Release.bat`. Version 0.2.0. **Done when:** a release published with
+`Release.bat` shows up in an installed older ClaudeIn, which installs it and starts again on the new version. Tested with a
+fake GitHub (newer/same/older, no releases, rate limit, no internet, unsigned, wrong key, replayed signature, changed file,
+files from elsewhere, `.venv` copy, the switch, nothing personal sent) and a dry-run release. **Not yet done:** the first
+real release (publishing it is the owner's call), so a real update from one version to the next is not yet seen.
+
 ## 6. Later changes in the Signal Lab apps (belong to `signal-lab-egx`, need their own approval there)
 
 1. The default port becomes 8790 (`HostClient.PORT`, `EgxHost` `PORT`), so the owner can type the address without
@@ -569,6 +613,9 @@ wrapped by Inno Setup 6 (`packaging\ClaudeIn.iss`).
    a free check, refusal with a clear message, one retry, and a known-good copy the owner can choose to download.
    ClaudeIn keeps **its own Claude login** by default (separate from the terminal's). One phase at a time: 5a
    (sign-in and guard) first, 5b (installer) after.
+9. **(2026-11-18) Updates come from the GitHub Releases of the main repository** `ikverse/ClaudeIn` (public), with the
+   installer attached to releases, not committed. Updates are signed with the owner's own key and are only installed on
+   the owner's click (see 4.10).
 
 Decided here without asking (can be changed): port 8790/8791; `/hello` keeps the old name for now; 2 runs at once;
 10 minutes at most in line; 20 can wait; runs stop after 15 minutes; logs are kept 14 days.

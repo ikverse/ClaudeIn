@@ -731,10 +731,11 @@ class CapsPage(Page):
 
 
 class GeneralPage(Page):
-    def __init__(self, svc: "Service", restart: Callable[[], None]):
+    def __init__(self, svc: "Service", restart: Callable[[], None], quit_: Callable[[], None] | None = None):
         super().__init__("general", "General")
         self.svc = svc
         self.restart = restart
+        self.quit_ = quit_  # used after an update's installer has started
 
         self.workers = ComboBox()
         self.workers.addItems(["1", "2", "3", "4"])
@@ -807,6 +808,7 @@ class GeneralPage(Page):
                              "Asks Claude one tiny Haiku question to confirm it really answers. Uses a very small "
                              "amount of the plan. (Signing in and the version check are on the Claude page and cost "
                              "nothing.)", self.check_b))
+        self._build_updates()
 
     def refresh(self) -> None:
         self.workers.blockSignals(True)
@@ -816,6 +818,91 @@ class GeneralPage(Page):
             w.blockSignals(True)
             w.setChecked(value)
             w.blockSignals(False)
+        self._refresh_updates()
+
+    # --- updates (phase 6) -------------------------------------------------------------------------------------------
+
+    def _build_updates(self) -> None:
+        self.update_install_b = PrimaryPushButton(FluentIcon.DOWNLOAD, "Install")
+        self.update_install_b.clicked.connect(self._install_update)
+        self.update_install_b.hide()
+        self.update_check_b = PushButton(FluentIcon.SYNC, "Check now")
+        self.update_check_b.clicked.connect(lambda: go(self.svc.updates.check()))
+        self.update_auto = SwitchButton()
+        self.update_auto.setOnText("Auto")
+        self.update_auto.setOffText("Off")
+        self.update_auto.setChecked(self.svc.settings.check_updates)
+        self.update_auto.checkedChanged.connect(self._auto_updates)
+        self.update_card = row(FluentIcon.UPDATE, "Updates", " ",
+                               hbox(self.update_install_b, self.update_check_b, self.update_auto))
+        self.v.addWidget(self.update_card)
+        self.update_bar = ProgressBar()
+        self.update_bar.hide()
+        self.v.addWidget(self.update_bar)
+
+    def _auto_updates(self, on: bool) -> None:
+        self.svc.settings.check_updates = on
+        self.svc.settings.save(self.svc.folder)
+
+    def _refresh_updates(self) -> None:
+        from .config import VERSION
+
+        u = self.svc.updates
+        s = u.status
+        lines = [f"This is ClaudeIn {VERSION}." + ("" if u.can_install else
+                                                  " It runs from .venv, so it is updated with git, not here.")]
+        r = s.release
+        if s.state == "checking":
+            lines.append("Checking GitHub…")
+        elif s.state == "up_to_date":
+            lines.append("It is up to date" + (f" (checked {when(s.checked_at)})." if s.checked_at else "."))
+        elif r is not None and s.state in ("available", "failed"):
+            lines.append(f"ClaudeIn {r.version} is available.")
+            if r.notes:
+                lines.append(r.notes[:400] + ("…" if len(r.notes) > 400 else ""))
+        if s.state == "downloading":
+            lines.append(f"Downloading ClaudeIn {r.version}… {s.done / 1e6:.0f} of {s.total / 1e6:.0f} MB")
+        elif s.state == "verifying":
+            lines.append("Checking the update's signature…")
+        elif s.state == "installing":
+            lines.append("Starting the installer. ClaudeIn closes now and starts again by itself.")
+        if s.state == "failed" and s.error:
+            lines.append(s.error)
+        lines.append("Looks on GitHub every 12 hours. Installing always asks first." if self.svc.settings.check_updates
+                     else "Automatic checks are off. Press Check now to look.")
+        self.update_card.caption.setText("\n".join(lines))
+        busy = s.state in ("checking", "downloading", "verifying", "installing")
+        self.update_check_b.setEnabled(not busy)
+        show = u.available is not None and u.can_install
+        self.update_install_b.setVisible(show)
+        self.update_install_b.setEnabled(show and not busy)
+        if show:
+            self.update_install_b.setText(f"Install {u.available.version}")
+        self.update_bar.setVisible(s.state in ("downloading", "verifying"))
+        if s.total:
+            self.update_bar.setValue(min(100, round(100 * s.done / s.total)))
+        self.update_auto.blockSignals(True)
+        self.update_auto.setChecked(self.svc.settings.check_updates)
+        self.update_auto.blockSignals(False)
+
+    def _install_update(self) -> None:
+        r = self.svc.updates.available
+        if r is None:
+            return
+        box = MessageBox(f"Install ClaudeIn {r.version}?",
+                         "ClaudeIn downloads it from its GitHub releases, checks its signature, and closes while it "
+                         "updates. It starts again by itself. Questions going now will stop.", self.window())
+        box.yesButton.setText("Install")
+        box.cancelButton.setText("Not now")
+        if box.exec():
+            go(self._run_install())
+
+    async def _run_install(self) -> None:
+        if await self.svc.updates.install():
+            if self.quit_ is not None:
+                self.quit_()  # the installer is running; it starts the new ClaudeIn when it is done
+        else:
+            self._info(False, "Update not installed", self.svc.updates.status.error or "Try again later.")
 
     async def check_phones(self) -> None:
         """The "Phone access" check: three plain lines, and the set-up button if the firewall rule is missing."""
@@ -926,7 +1013,8 @@ class GeneralPage(Page):
 # --- the windows ---------------------------------------------------------------------------------------------------------
 
 class SettingsWindow(GlassMixin, FluentWindow):
-    def __init__(self, svc: "Service", open_pairing: Callable[[], None], restart: Callable[[], None], icon):
+    def __init__(self, svc: "Service", open_pairing: Callable[[], None], restart: Callable[[], None], icon,
+                 quit_: Callable[[], None] | None = None):
         super().__init__()
         self._init_glass()
         self.setWindowTitle("ClaudeIn")
@@ -938,7 +1026,7 @@ class SettingsWindow(GlassMixin, FluentWindow):
         self.devices = DevicesPage(svc, open_pairing)
         self.usage = UsagePage(svc)
         self.caps = CapsPage(svc)
-        self.general = GeneralPage(svc, restart)
+        self.general = GeneralPage(svc, restart, quit_)
         self.addSubInterface(self.home, FluentIcon.HOME, "Home")
         self.addSubInterface(self.claude, FluentIcon.ROBOT, "Claude")
         self.addSubInterface(self.devices, FluentIcon.PHONE, "Devices")
