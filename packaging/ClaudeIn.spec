@@ -6,6 +6,7 @@ from PyInstaller.utils.hooks import collect_data_files, collect_submodules
 
 ROOT = os.path.abspath(os.path.join(SPECPATH, ".."))
 ICON = os.path.join(ROOT, "build", "claudein.ico")
+VERSION_FILE = os.path.join(ROOT, "build", "version_info.txt")  # name, version, publisher (written by build.py)
 
 hidden = (collect_submodules("claudein") + collect_submodules("claude_agent_sdk")
           + ["win32com.client", "pythoncom", "pywintypes", "qasync"])
@@ -28,5 +29,6 @@ a.datas = [d for d in a.datas if "_bundled" not in d[0].replace("\\", "/")]
 
 pyz = PYZ(a.pure)
 exe = EXE(pyz, a.scripts, [], exclude_binaries=True, name="ClaudeIn", console=False,
-          icon=ICON if os.path.exists(ICON) else None)
+          icon=ICON if os.path.exists(ICON) else None,
+          version=VERSION_FILE if os.path.exists(VERSION_FILE) else None)
 coll = COLLECT(exe, a.binaries, a.datas, name="ClaudeIn")

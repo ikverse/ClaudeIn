@@ -86,7 +86,7 @@ def test_restart_task_added_and_removed():
 def test_task_runs_the_watchdog():
     xml = autostart.task_xml()
     assert "<Arguments>-m claudein --watchdog</Arguments>" in xml
-    assert "<Interval>PT1M</Interval>" in xml
+    assert "<Interval>PT5M</Interval>" in xml  # every 5 minutes since phase 7 (every minute looked like malware)
     assert "<ExecutionTimeLimit>PT0S</ExecutionTimeLimit>" in xml  # never cut ClaudeIn off after 72 hours
     assert "<RunLevel>LeastPrivilege</RunLevel>" in xml  # no admin rights
 

@@ -6,6 +6,8 @@
     python  -m claudein --setup         from Setup-ClaudeIn.bat: icon file and Start Menu shortcut
     python  -m claudein --remove-startup  from the uninstaller: removes the Startup shortcut and restart task that start
                                         this program (not another copy's)
+    python  -m claudein --quit          from the installer: asks the running ClaudeIn to close, and waits (20 s at most).
+                                        Exit code 0 once none is running, 1 if it is still running
 
 Installed with ClaudeIn-Setup.exe, the same commands are given to ClaudeIn.exe (without `-m claudein`).
 """
@@ -72,8 +74,24 @@ class OneCopy:
             read()  # the message may have arrived before we started listening for it
 
 
+def quit_running_copy(wait_s: float = 20.0) -> int:
+    """--quit: asks the running ClaudeIn (this Windows account's) to close, the way Quit in the tray does, and waits."""
+    from PySide6.QtCore import QCoreApplication
+
+    app = QCoreApplication.instance() or QCoreApplication(sys.argv[:1])  # noqa: F841  (needed for the local socket)
+    if not other_copy_running(b"quit"):
+        return 0
+    end = time.monotonic() + wait_s
+    while time.monotonic() < end:
+        time.sleep(0.5)
+        if not other_copy_running():
+            return 0
+    return 1
+
+
 def setup() -> None:
-    """Makes the icon file and the Start Menu shortcut (and refreshes the Startup one if it is on)."""
+    """Makes the icon file and the Start Menu shortcut, refreshes the Startup one if it is on, and makes the restart task
+    match its switch (which also clears the every-minute task older versions made)."""
     from PySide6.QtGui import QGuiApplication
 
     from .tray import save_ico
@@ -83,7 +101,7 @@ def setup() -> None:
     autostart.make_shortcut(autostart.start_menu_shortcut())
     if autostart.enabled():
         autostart.make_shortcut(autostart.startup_shortcut())
-        autostart.add_task()
+    autostart.sync_restart(config.Settings.load().restart_if_stopped)
     print("Start Menu shortcut made: ClaudeIn")
 
 
@@ -94,6 +112,8 @@ def main(argv: list[str]) -> int:
     if "--remove-startup" in argv:  # from the uninstaller: remove the Startup shortcut and restart task that are ours
         autostart.remove_if_ours()
         return 0
+    if "--quit" in argv:  # from the installer and uninstaller: close the running copy politely
+        return quit_running_copy()
     watchdog = "--watchdog" in argv
     if watchdog and autostart.quit_flag_set():
         return 0  # the owner chose Quit; stay off until the next sign-in
@@ -130,7 +150,9 @@ def main(argv: list[str]) -> int:
     restart_wanted = {"on": False}
 
     def message(text: str) -> None:
-        if "show" in text and "tray" in holder:
+        if text.strip() == "quit":  # `ClaudeIn.exe --quit`, from the installer: close as Quit in the tray does
+            quit_()
+        elif "show" in text and "tray" in holder:
             holder["tray"].balloon("ClaudeIn is already running. Its icon is in the hidden icons by the clock.")
 
     one = OneCopy(message)  # noqa: F841  (kept for the app's life)
@@ -151,6 +173,8 @@ def main(argv: list[str]) -> int:
         svc = Service(on_change=on_change)
         sys.excepthook = lambda t, v, tb: log.error("Unexpected error", exc_info=(t, v, tb))
         await svc.start_safely()
+        if not watchdog:  # the restart task follows its switch (and an older every-minute task is cleared)
+            await asyncio.to_thread(autostart.sync_restart, svc.settings.restart_if_stopped)
         if svc.settings.keep_awake:
             svc.scheduler.set_keep_awake(True)  # "Keep PC awake" was left on
         holder["tray"] = Tray(svc, quit_, restart)

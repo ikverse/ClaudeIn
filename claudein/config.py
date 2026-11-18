@@ -42,6 +42,7 @@ class Settings:
     own_login: bool = True  # ClaudeIn keeps its own Claude login (.claudein\claude), apart from the terminal's
     claude_copy: str = "pc"  # "pc": the Claude Code installed on this PC; "own": the copy ClaudeIn downloaded for itself
     check_updates: bool = True  # look for a newer ClaudeIn on GitHub now and then (installing always needs a click)
+    restart_if_stopped: bool = False  # the restart task (every 5 minutes); off by default since phase 7
 
     def clamp(self) -> "Settings":
         self.workers = max(1, min(4, int(self.workers)))

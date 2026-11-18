@@ -40,6 +40,11 @@ Started 2026-11-15. Phases 1, 2, 3 (client library), 4 (away from home: Tailscal
     release file, never committed. Updates install only on the owner's click and only with a valid signature from the
     owner's key (`%USERPROFILE%\.claudein-release\signing-key.pem`, never in the project or on GitHub). Releases are made
     with `Release.bat`; publishing one is always the owner's call (`docs/plan.md` 4.10, phase 6).
+13. (2026-11-18, phase 7) Windows Defender once quarantined ClaudeIn.exe as a false "Trojan…!ml". So: publisher `ikverse`
+    in the program's details; PyInstaller's starter compiled here; the restart task is its own switch, off by default,
+    every 5 minutes; ClaudeIn is closed politely (`--quit`) before any force. ClaudeIn never changes Defender's settings;
+    restoring from quarantine, exclusions and reporting false alarms are the owner's. Test installers (`build.py
+    --test`) have their own app ID and never touch the real install.
 
 ## Fixed technical choices (from the plan)
 

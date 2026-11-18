@@ -1,8 +1,10 @@
-"""Start with Windows, restart after a crash, and the Start Menu shortcut (plan 4.6 and 4.8). No admin rights needed.
+"""Start with Windows, restart if it stops, and the Start Menu shortcut (plan 4.6, 4.8 and phase 7). No admin rights.
 
-- "Start with Windows" puts ClaudeIn.lnk in the owner's Startup folder, and adds a scheduled task in the owner's own
-  account that runs `pythonw -m claudein --watchdog` every minute. The watchdog start does nothing when ClaudeIn is
-  already running, or when the owner chose Quit (quit.flag); otherwise it starts ClaudeIn again.
+- "Start with Windows" puts ClaudeIn.lnk in the owner's Startup folder. Nothing else.
+- "Restart ClaudeIn if it stops" (its own switch, off by default since phase 7) adds a scheduled task in the owner's own
+  account that runs `pythonw -m claudein --watchdog` every 5 minutes. The watchdog start does nothing when ClaudeIn is
+  already running, or when the owner chose Quit (quit.flag); otherwise it starts ClaudeIn again. (It used to be on with
+  "Start with Windows" and run every minute; Windows Defender's guesswork took that for malware.)
 - Quit writes quit.flag. Any normal start (sign-in, Start Menu, setup) removes it.
 """
 
@@ -24,6 +26,7 @@ FROZEN = bool(getattr(sys, "frozen", False))
 #: The folder ClaudeIn starts in: the program's own folder when installed, the project folder from .venv.
 PROJECT = Path(sys.executable).resolve().parent if FROZEN else Path(__file__).resolve().parent.parent
 TASK_NAME = "ClaudeIn keep running"
+RESTART_INTERVAL = "PT5M"  # how often the restart task looks (Windows' notation: 5 minutes)
 QUIT_FLAG = "quit.flag"
 ICON = "claudein.ico"
 _NO_WINDOW = getattr(subprocess, "CREATE_NO_WINDOW", 0)
@@ -90,11 +93,11 @@ def task_xml() -> str:
     start = datetime.now().replace(microsecond=0).isoformat()
     return f"""<?xml version="1.0" encoding="UTF-16"?>
 <Task version="1.2" xmlns="http://schemas.microsoft.com/windows/2004/02/mit/task">
-  <RegistrationInfo><Description>Starts ClaudeIn again within a minute if it stopped without Quit.</Description></RegistrationInfo>
+  <RegistrationInfo><Description>Starts ClaudeIn again within 5 minutes if it stopped without Quit.</Description></RegistrationInfo>
   <Triggers>
     <TimeTrigger>
       <StartBoundary>{start}</StartBoundary>
-      <Repetition><Interval>PT1M</Interval><StopAtDurationEnd>false</StopAtDurationEnd></Repetition>
+      <Repetition><Interval>{RESTART_INTERVAL}</Interval><StopAtDurationEnd>false</StopAtDurationEnd></Repetition>
       <Enabled>true</Enabled>
     </TimeTrigger>
   </Triggers>
@@ -123,22 +126,23 @@ def _schtasks(*args: str) -> subprocess.CompletedProcess:
     return subprocess.run(["schtasks", *args], capture_output=True, text=True, creationflags=_NO_WINDOW)
 
 
-def add_task(name: str = TASK_NAME) -> bool:
+def add_task(name: str | None = None) -> bool:
+    """[name] defaults to TASK_NAME, read when called (so tests can use a private name)."""
     with tempfile.NamedTemporaryFile("w", suffix=".xml", delete=False, encoding="utf-16") as f:
         f.write(task_xml())
         xml = f.name
     try:
-        return _schtasks("/Create", "/TN", name, "/XML", xml, "/F").returncode == 0
+        return _schtasks("/Create", "/TN", name or TASK_NAME, "/XML", xml, "/F").returncode == 0
     finally:
         os.unlink(xml)
 
 
-def remove_task(name: str = TASK_NAME) -> None:
-    _schtasks("/Delete", "/TN", name, "/F")
+def remove_task(name: str | None = None) -> None:
+    _schtasks("/Delete", "/TN", name or TASK_NAME, "/F")
 
 
-def task_exists(name: str = TASK_NAME) -> bool:
-    return _schtasks("/Query", "/TN", name).returncode == 0
+def task_exists(name: str | None = None) -> bool:
+    return _schtasks("/Query", "/TN", name or TASK_NAME).returncode == 0
 
 
 # --- the switch in the panel and General ----------------------------------------------------------------------------------
@@ -169,10 +173,26 @@ def remove_if_ours() -> None:
 
 
 def set_enabled(on: bool) -> bool:
-    """Returns False if Windows refused to add the restart task (the shortcut still works)."""
+    """"Start with Windows": the Startup shortcut only. (The restart task is its own switch: set_restart.)"""
     if on:
         make_shortcut(startup_shortcut())
+    else:
+        startup_shortcut().unlink(missing_ok=True)
+    return True
+
+
+def set_restart(on: bool) -> bool:
+    """"Restart ClaudeIn if it stops". Returns False if Windows refused to add the task."""
+    if on:
         return add_task()
-    startup_shortcut().unlink(missing_ok=True)
     remove_task()
     return True
+
+
+def sync_restart(on: bool) -> None:
+    """Makes the restart task match the setting: added (or refreshed, for this program and the 5-minute interval) when on,
+    removed when off. Clears away the every-minute task that older versions added with "Start with Windows"."""
+    if on:
+        add_task()
+    elif task_exists():
+        remove_task()

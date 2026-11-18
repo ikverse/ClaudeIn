@@ -4,7 +4,8 @@ Status (2026-11-15): **phase 1 built** (a phone has paired; a phone question thr
 **phase 2 built**; **phase 3's client library built** (the Village move waits for Village's project); **phase 5a built**
 (2026-11-18: sign in with Claude from inside ClaudeIn, finding the Claude Code installed on the PC, and the guard against
 Claude Code updates; section 4.9), **phase 5b built** (2026-11-18: `ClaudeIn-Setup.exe`, see phase 5b below) and
-**phase 6 built** (2026-11-18: updates from the GitHub releases, section 4.10; no release published yet). Written 2026-11-15. Every phase below needs its own "approve" before any code is
+**phase 6 built** (2026-11-18: updates from the GitHub releases, section 4.10; no release published yet) and **phase 7
+built** (2026-11-18: fewer false Windows Defender alarms). Written 2026-11-15. Every phase below needs its own "approve" before any code is
 written (see `CLAUDE.md`).
 
 ## 1. What ClaudeIn is, in plain words
@@ -287,7 +288,9 @@ Mica**, which tints with the desktop wallpaper and stays dark. The tray panel an
 
 **Restart after a crash.** "Start with Windows" also sets up a Windows scheduled task, in the owner's own account with
 no admin rights, that starts ClaudeIn again within a minute if it has stopped without Quit. Quit leaves it stopped
-until the next sign-in.
+until the next sign-in. **Change (phase 7, 2026-11-18):** Windows Defender took this every-minute task (with the rest of
+the program) for malware. It is now its own switch on General, "Restart ClaudeIn if it stops", **off by default**, and
+runs every 5 minutes when on. "Start with Windows" is only the Startup shortcut.
 
 **Back up and restore pairings.** "Back up pairings" saves the certificate, its key and the pairing list (hashed codes
 only) as one file wherever the owner picks. "Restore pairings" puts them back, so a lost `.claudein` folder doesn't
@@ -531,6 +534,30 @@ fake GitHub (newer/same/older, no releases, rate limit, no internet, unsigned, w
 files from elsewhere, `.venv` copy, the switch, nothing personal sent) and a dry-run release. **Not yet done:** the first
 real release (publishing it is the owner's call), so a real update from one version to the next is not yet seen.
 
+### Phase 7: fewer false Windows Defender alarms (built 2026-11-18)
+**Why:** right after the owner's ClaudeIn was reinstalled with the first 0.2.0 build, Windows Defender quarantined
+`ClaudeIn.exe` as `Trojan:Win32/Bearfoos.A!ml` (a machine-learning guess, not a known-malware match) and removed its
+shortcuts and restart task. Unsigned PyInstaller programs that start with Windows, restart themselves every minute, stop
+processes by name and can download and run an installer look like malware to that guesswork.
+- **Version details** in `ClaudeIn.exe` (publisher `ikverse`, product, version, description, the GitHub address; made by
+  `build.py`) and in the installer (publisher, website, version).
+- **PyInstaller's starter compiled on this PC** (`build.py`, with Visual Studio's C++ tools, once per PyInstaller version;
+  remembered in `build\own-starter.sha256`). `--prebuilt-starter` skips it where there are no C++ tools.
+- **The restart task** is its own switch, off by default, every 5 minutes (see 4.6). A normal start and `--setup` make the
+  task match the switch, which also clears the every-minute task older versions left.
+- **Closing politely:** `ClaudeIn.exe --quit` asks the running copy to close (as Quit in the tray) and waits up to 20 s.
+  The installer and uninstaller use it, and stop ClaudeIn by force only if it is still running after that.
+- **Updates start the normal Windows way** (ShellExecute, like a double-click) with the installer's progress showing.
+- **Test installers** (`build.py --test`): "ClaudeIn Test", their own app ID and folder, no shortcuts, no restart task, and
+  they never stop the real ClaudeIn.
+- **Defender scan of every build** (`MpCmdRun`, report only); a finding stops the build.
+- **Checked:** the compiled starter, the version details, both scans clean, the test build installed and run for 2 minutes
+  with no Defender detection, `--quit` closing it in about a second, and the test uninstall leaving the real install alone.
+- **Limits:** the 2-minute run doesn't include the Startup shortcut (test builds make none). An unsigned program can still
+  be flagged, and each new version starts with no reputation. The reliable fix is code-signing (not done; a paid
+  certificate, Microsoft's Trusted Signing, or free open-source signing, to be looked into). The owner can also report a
+  false alarm to Microsoft (microsoft.com/wdsi/filesubmission).
+
 ## 6. Later changes in the Signal Lab apps (belong to `signal-lab-egx`, need their own approval there)
 
 1. The default port becomes 8790 (`HostClient.PORT`, `EgxHost` `PORT`), so the owner can type the address without
@@ -616,6 +643,8 @@ real release (publishing it is the owner's call), so a real update from one vers
 9. **(2026-11-18) Updates come from the GitHub Releases of the main repository** `ikverse/ClaudeIn` (public), with the
    installer attached to releases, not committed. Updates are signed with the owner's own key and are only installed on
    the owner's click (see 4.10).
+10. **(2026-11-18) Fewer false Defender alarms** (phase 7): publisher name `ikverse`; the restart task off by default and
+    every 5 minutes when on.
 
 Decided here without asking (can be changed): port 8790/8791; `/hello` keeps the old name for now; 2 runs at once;
 10 minutes at most in line; 20 can wait; runs stop after 15 minutes; logs are kept 14 days.

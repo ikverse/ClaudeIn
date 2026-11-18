@@ -87,9 +87,12 @@ class UpdateState:
 
 
 def launch_installer(path: Path) -> None:
-    """Starts the installer on its own, so it keeps going after ClaudeIn quits."""
-    flags = getattr(subprocess, "DETACHED_PROCESS", 0) | getattr(subprocess, "CREATE_NEW_PROCESS_GROUP", 0)
-    subprocess.Popen([str(path), *INSTALLER_ARGS], creationflags=flags, close_fds=True)
+    """Starts the installer the way a double-click does (Windows' ShellExecute), with its progress window showing. It
+    keeps going after ClaudeIn quits. (Not a hidden, detached process: that looks like malware to Defender.)"""
+    if os.name == "nt":
+        os.startfile(str(path), arguments=" ".join(INSTALLER_ARGS), show_cmd=1)  # 1: SW_SHOWNORMAL
+    else:
+        subprocess.Popen([str(path), *INSTALLER_ARGS], close_fds=True)
 
 
 class Updater:

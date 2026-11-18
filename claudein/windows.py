@@ -751,8 +751,16 @@ class GeneralPage(Page):
         self.autostart.setChecked(autostart.enabled())
         self.autostart.checkedChanged.connect(self._autostart)
         self.v.addWidget(row(FluentIcon.POWER_BUTTON, "Start with Windows",
-                             "Starts ClaudeIn when you sign in, and again within a minute if it ever stops without "
-                             "Quit.", self.autostart))
+                             "Starts ClaudeIn when you sign in to Windows.", self.autostart))
+
+        self.restart_sw = SwitchButton()
+        self.restart_sw.setOnText("On")
+        self.restart_sw.setOffText("Off")
+        self.restart_sw.setChecked(svc.settings.restart_if_stopped)
+        self.restart_sw.checkedChanged.connect(lambda on: asyncio.ensure_future(self._restart_switch(on)))
+        self.v.addWidget(row(FluentIcon.SYNC, "Restart ClaudeIn if it stops",
+                             "Starts ClaudeIn again within 5 minutes if it ever stops without Quit. Off by default: "
+                             "Windows Defender can take this kind of task for malware.", self.restart_sw))
 
         self.phone_check_b = PushButton(FluentIcon.SYNC, "Check")
         self.phone_check_b.clicked.connect(lambda: asyncio.ensure_future(self.check_phones()))
@@ -814,7 +822,8 @@ class GeneralPage(Page):
         self.workers.blockSignals(True)
         self.workers.setCurrentIndex(self.svc.settings.workers - 1)
         self.workers.blockSignals(False)
-        for w, value in ((self.awake, self.svc.settings.keep_awake), (self.autostart, autostart.enabled())):
+        for w, value in ((self.awake, self.svc.settings.keep_awake), (self.autostart, autostart.enabled()),
+                         (self.restart_sw, self.svc.settings.restart_if_stopped)):
             w.blockSignals(True)
             w.setChecked(value)
             w.blockSignals(False)
@@ -944,10 +953,15 @@ class GeneralPage(Page):
                                                    position=InfoBarPosition.TOP, parent=self.window())
 
     def _autostart(self, on: bool) -> None:
-        ok = autostart.set_enabled(on)
+        autostart.set_enabled(on)
+
+    async def _restart_switch(self, on: bool) -> None:
+        ok = await asyncio.to_thread(autostart.set_restart, on)
+        self.svc.settings.restart_if_stopped = on and ok
+        self.svc.settings.save(self.svc.folder)
         if not ok:
-            self._info(False, "Restart task not added",
-                       "ClaudeIn will start with Windows, but Windows refused the task that restarts it after a crash.")
+            self._info(False, "Restart task not added", "Windows refused the task that restarts ClaudeIn.")
+            self.refresh()
 
     def _new_token(self) -> None:
         box = MessageBox("Make a new local token?",
