@@ -19,7 +19,7 @@ from .windows import claude_line, glass_allowed, plan_text, solid, status_line, 
 if TYPE_CHECKING:
     from .service import Service
 
-WIDTH = 360
+WIDTH = 440  # wide enough for the four bottom buttons' names in full
 
 
 class Panel(AcrylicWindow):

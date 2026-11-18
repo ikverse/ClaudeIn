@@ -18,7 +18,7 @@ if TYPE_CHECKING:
     from .service import Service
 
 COLOURS = {
-    "normal": "#0F6CBD",   # Windows blue
+    "normal": "#D97757",   # Claude's orange
     "working": "#107C10",  # green
     "paused": "#6B6B6B",   # grey
     "problem": "#C42B1C",  # red
