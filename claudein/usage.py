@@ -211,6 +211,88 @@ class Usage:
                             " ORDER BY id DESC LIMIT 1").fetchone()
         return {"five_hour": r[0], "seven_day": r[1], "at": r[2]} if r else None
 
+    # --- for the Usage dashboard (read only) ---------------------------------------------------------------------------
+    # [filters] maps a column (app, device, model, ending) to the one value to keep; a missing or empty value keeps all.
+
+    def version(self) -> tuple:
+        """Changes whenever a row is added or its points are worked out, so the page redraws only then."""
+        return tuple(self.db.execute("SELECT COUNT(*), MAX(id), TOTAL(plan_points) FROM runs").fetchone())
+
+    @staticmethod
+    def _where(since: float, filters: dict | None) -> tuple[str, list]:
+        sql, args = ["asked_at >= ?"], [since]
+        for col, value in (filters or {}).items():
+            if col not in FILTER_COLUMNS:
+                raise ValueError(col)
+            if value not in (None, ""):
+                sql.append(f"{col} = ?")
+                args.append(value)
+        return " AND ".join(sql), args
+
+    def choices(self) -> dict[str, list[str]]:
+        """Every app, device, model and ending seen so far, for the filter lists."""
+        return {c: [r[0] for r in self.db.execute(f"SELECT DISTINCT {c} FROM runs ORDER BY {c}")]
+                for c in FILTER_COLUMNS}
+
+    def summary(self, since: float, filters: dict | None = None) -> dict:
+        w, a = self._where(since, filters)
+        r = self.db.execute(
+            f"SELECT COUNT(*), TOTAL({_TOKENS}), TOTAL(plan_points), TOTAL(api_price_usd),"
+            " TOTAL(ending = 'done'), AVG(queued_ms), AVG(CASE WHEN started_at IS NOT NULL THEN run_ms END),"
+            f" MIN(asked_at) FROM runs WHERE {w}", a).fetchone()
+        return {"questions": r[0], "tokens": int(r[1]), "plan_points": r[2], "api_price_usd": r[3],
+                "done": int(r[4]), "avg_queued_ms": r[5], "avg_run_ms": r[6], "first_at": r[7]}
+
+    def series(self, since: float, filters: dict | None, step: str) -> dict[tuple[str, str], dict]:
+        """Sums per (period, app). [step] is "hour", "day" or "month"; the period is its PC-time key, as made by
+        period_key()."""
+        w, a = self._where(since, filters)
+        rows = self.db.execute(
+            f"SELECT strftime('{_KEY_FORMAT[step]}', asked_at, 'unixepoch', 'localtime') AS k, app, COUNT(*),"
+            f" TOTAL({_TOKENS}), TOTAL(plan_points), TOTAL(api_price_usd) FROM runs WHERE {w} GROUP BY k, app",
+            a).fetchall()
+        return {(k, app): {"questions": n, "tokens": int(tok), "plan_points": pts, "api_price_usd": usd}
+                for k, app, n, tok, pts, usd in rows}
+
+    def breakdown(self, since: float, filters: dict | None, by: str) -> list[dict]:
+        """Sums per app, device or model, the busiest first."""
+        if by not in ("app", "device", "model"):
+            raise ValueError(by)
+        w, a = self._where(since, filters)
+        rows = self.db.execute(
+            f"SELECT {by}, COUNT(*), TOTAL({_TOKENS}), TOTAL(plan_points), TOTAL(api_price_usd), AVG(queued_ms),"
+            f" TOTAL(ending = 'failed') FROM runs WHERE {w} GROUP BY {by} ORDER BY COUNT(*) DESC, {by}", a).fetchall()
+        return [{"key": k, "questions": n, "tokens": int(tok), "plan_points": pts, "api_price_usd": usd,
+                 "avg_queued_ms": q, "failed": int(f)} for k, n, tok, pts, usd, q, f in rows]
+
+    def endings(self, since: float, filters: dict | None = None) -> dict:
+        """How the runs ended: {ending: count}, and the kinds of failure: {error_kind: count}."""
+        w, a = self._where(since, filters)
+        ends = dict(self.db.execute(f"SELECT ending, COUNT(*) FROM runs WHERE {w} GROUP BY ending", a).fetchall())
+        kinds = dict(self.db.execute(f"SELECT COALESCE(error_kind, 'other'), COUNT(*) FROM runs WHERE {w}"
+                                     " AND ending = 'failed' GROUP BY 1 ORDER BY 2 DESC", a).fetchall())
+        return {"endings": ends, "failures": kinds}
+
+    def runs(self, since: float, filters: dict | None = None, limit: int = 50) -> list[dict]:
+        """The newest runs first."""
+        w, a = self._where(since, filters)
+        cols = ("asked_at", "app", "device", "model", "queued_ms", "run_ms", "ending", "error_kind", "tokens",
+                "plan_points")
+        rows = self.db.execute(
+            f"SELECT asked_at, app, device, model, queued_ms, run_ms, ending, error_kind, {_TOKENS}, plan_points"
+            f" FROM runs WHERE {w} ORDER BY asked_at DESC LIMIT ?", a + [limit]).fetchall()
+        return [dict(zip(cols, r)) for r in rows]
+
+
+FILTER_COLUMNS = ("app", "device", "model", "ending")
+_TOKENS = "input+output+cache_read+cache_write"
+_KEY_FORMAT = {"hour": "%Y-%m-%d %H", "day": "%Y-%m-%d", "month": "%Y-%m"}
+
+
+def period_key(t: float, step: str) -> str:
+    """The same key series() gives a run asked at [t]."""
+    return time.strftime(_KEY_FORMAT[step], time.localtime(t))
+
 
 def setup_logs(folder: Path) -> logging.Logger:
     """logs\\claudein.log, a new file each day, kept 14 days."""

@@ -220,6 +220,12 @@ the address gets `:8790` on the end, which means re-pairing once.
   - the plan-limit numbers Claude Code last reported (these are for the whole plan, not per app; each app's share is
     shown as its share of today's tokens)
   - its last 20 runs, with time, model, how long and how it ended
+  - **Change (owner, 2026-11-20): the Usage page is a dashboard with filters.** Period (today, 7 days, 30 days, all
+    time), app, device, model and how runs ended; everything below follows them except plan use (the whole plan's).
+    It shows headline numbers, a chart over time per app (questions, tokens, plan points or API price), share per
+    app, how runs ended, a breakdown by app, device or model (a row click filters by it), and the runs list with
+    "Show more". The charts are drawn by ClaudeIn itself (`claudein/charts.py`); no chart library is added. The page
+    only reads usage.db.
 - **Caps (phase 2):** an optional daily cap per app, which is off unless the owner turns it on. **It counts share of the
   Claude plan's limit** (owner, 2026-11-15).
   - **How the share is measured.** After every run, Claude Code reports how full the plan's 5-hour window is, for the

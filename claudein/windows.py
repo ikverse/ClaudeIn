@@ -13,25 +13,26 @@ import json
 import os
 import time
 import winreg
-from datetime import datetime
+from datetime import datetime, timedelta
 from pathlib import Path
 from typing import TYPE_CHECKING, Callable
 
 from PySide6.QtCore import QEvent, Qt, QTimer, QUrl
 from PySide6.QtGui import QColor, QDesktopServices, QFont, QGuiApplication, QPixmap
-from PySide6.QtWidgets import (QFileDialog, QFrame, QHBoxLayout, QHeaderView, QLabel, QTableWidgetItem, QVBoxLayout,
-                               QWidget)
+from PySide6.QtWidgets import (QFileDialog, QFrame, QGridLayout, QHBoxLayout, QHeaderView, QLabel, QTableWidgetItem,
+                               QVBoxLayout, QWidget)
 from qfluentwidgets import (BodyLabel, CaptionLabel, ComboBox, EditableComboBox, FluentIcon, FluentWidget,
                             FluentWindow, IconWidget, InfoBar, InfoBarPosition, LineEdit, MessageBox,
                             NavigationItemPosition, PrimaryPushButton, ProgressBar, PushButton, ScrollArea,
-                            SimpleCardWidget, StrongBodyLabel, SubtitleLabel, SwitchButton, TableWidget,
-                            TitleLabel, isDarkTheme)
+                            SegmentedWidget, SimpleCardWidget, StrongBodyLabel, SubtitleLabel, SwitchButton,
+                            TableWidget, TitleLabel, isDarkTheme)
 
 from . import autostart, tailscale, tls
+from .charts import ShareList, StackedBars, ending_colour, series_colour
 from .claudecode import INSTALL_PAGE, KNOWN_GOOD, safe_link
 from .pairing import shown
 from .service import lan_addresses
-from .usage import ENDINGS, start_of_today
+from .usage import FILTER_COLUMNS, start_of_today
 
 if TYPE_CHECKING:
     from .service import Service
@@ -566,85 +567,376 @@ class DevicesPage(Page):
             self.svc.forget(dev.id)
 
 
+PERIODS = [("today", "Today"), ("7", "7 days"), ("30", "30 days"), ("all", "All time")]
+PERIOD_WORDS = {"today": "today", "7": "today and the 6 days before", "30": "today and the 29 days before",
+                "all": "everything recorded"}
+MEASURES = [("questions", "Questions"), ("tokens", "Tokens"), ("plan_points", "Plan points"),
+            ("api_price_usd", "API price")]
+GROUPS = [("app", "By app"), ("device", "By device"), ("model", "By model")]
+ENDING_WORDS = {"done": "done", "stopped": "stopped", "declined": "declined", "rounds": "ran out of rounds",
+                "cut short": "cut short", "failed": "failed"}
+
+
+def period_start(period: str, now: float | None = None) -> float:
+    """Where a period starts: midnight today, 6 or 29 days before that, or the beginning."""
+    now = time.time() if now is None else now
+    days = {"today": 0, "7": 6, "30": 29}.get(period)
+    return 0.0 if days is None else start_of_today(now - days * 86400)
+
+
+def buckets(period: str, first_at: float | None, now: float | None = None) -> tuple[str, list[str], list[str]]:
+    """(step, keys, labels) for the bars: per hour today, per day for 7 and 30 days, and for all time per day when
+    it covers two months or less, else per month."""
+    now = time.time() if now is None else now
+    today = datetime.fromtimestamp(now)
+    if period == "today":
+        hours = [today.replace(hour=h, minute=0, second=0, microsecond=0) for h in range(today.hour + 1)]
+        return "hour", [d.strftime("%Y-%m-%d %H") for d in hours], [d.strftime("%H:00") for d in hours]
+    start = period_start(period, now) if period != "all" else first_at
+    if start is None:
+        return "day", [], []
+    first = datetime.fromtimestamp(start).date()
+    if period == "all" and (today.date() - first).days > 62:
+        months, y, m = [], first.year, first.month
+        while (y, m) <= (today.year, today.month):
+            months.append(datetime(y, m, 1))
+            y, m = (y + 1, 1) if m == 12 else (y, m + 1)
+        return "month", [d.strftime("%Y-%m") for d in months], [d.strftime("%b %Y") for d in months]
+    days = [first + timedelta(days=i) for i in range((today.date() - first).days + 1)]
+    return "day", [d.strftime("%Y-%m-%d") for d in days], [d.strftime("%d %b").lstrip("0") for d in days]
+
+
+def short_number(n: float) -> str:
+    n = float(n or 0)
+    if n >= 1e6:
+        return f"{n / 1e6:.1f}M"
+    if n >= 1e3:
+        return f"{n / 1e3:.0f}k"
+    return f"{n:.0f}"
+
+
+def measure_text(value: float, measure: str) -> str:
+    if measure == "questions":
+        return f"{value:.0f}"
+    if measure == "tokens":
+        return short_number(value)
+    if measure == "plan_points":
+        return f"{value:.1f}"
+    return f"${value:.2f}"
+
+
+def ended_text(ending: str, error_kind: str | None) -> str:
+    return f"failed ({error_kind or 'other'})" if ending == "failed" else ENDING_WORDS.get(ending, ending)
+
+
+def card(*widgets) -> tuple[SimpleCardWidget, QVBoxLayout]:
+    c = SimpleCardWidget()
+    v = QVBoxLayout(c)
+    v.setContentsMargins(16, 12, 16, 14)
+    v.setSpacing(8)
+    for w in widgets:
+        v.addWidget(w) if isinstance(w, QWidget) else v.addLayout(w)
+    return c, v
+
+
+def table(cols: list[str], stretch: tuple[int, ...]) -> TableWidget:
+    """Columns fit their contents, except the [stretch] ones, which share the rest and shorten long text."""
+    t = TableWidget()
+    t.setColumnCount(len(cols))
+    t.setHorizontalHeaderLabels(cols)
+    t.verticalHeader().hide()
+    t.setEditTriggers(TableWidget.EditTrigger.NoEditTriggers)
+    t.setWordWrap(False)
+    t.setTextElideMode(Qt.TextElideMode.ElideRight)
+    head = t.horizontalHeader()
+    head.setSectionResizeMode(QHeaderView.ResizeMode.ResizeToContents)
+    for c in stretch:
+        head.setSectionResizeMode(c, QHeaderView.ResizeMode.Stretch)
+    t.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+    t.setVerticalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+    return t
+
+
+def fit_rows(t: TableWidget) -> None:
+    """Tall enough for every row, so the page scrolls rather than the table."""
+    rows = max(1, t.rowCount())
+    t.setFixedHeight(t.horizontalHeader().height() + rows * t.verticalHeader().defaultSectionSize() + 6)
+
+
 class UsagePage(Page):
+    """A dashboard of the usage records: filters at the top, and everything under them follows the filters, apart
+    from plan use, which is the whole Claude plan's."""
+
     def __init__(self, svc: "Service"):
         super().__init__("usage", "Usage")
         self.svc = svc
-        self.plan = CaptionLabel("")
-        self.plan.setWordWrap(True)
-        self.v.addWidget(self.plan)
-        self.v.addWidget(StrongBodyLabel("Per app"))
-        self.table = TableWidget()
-        cols = ["App", "Today: questions", "Today: tokens", "Share of today", "Today: points", "Today: API price",
-                "7 days: questions", "7 days: tokens", "7 days: points", "7 days: API price"]
-        self.table.setColumnCount(len(cols))
-        self.table.setHorizontalHeaderLabels(cols)
-        self.table.verticalHeader().hide()
-        self.table.setEditTriggers(TableWidget.EditTrigger.NoEditTriggers)
-        self.table.horizontalHeader().setSectionResizeMode(QHeaderView.ResizeMode.ResizeToContents)
-        self.table.horizontalHeader().setStretchLastSection(True)
-        self.table.setMinimumHeight(160)
-        self.v.addWidget(self.table)
-        head = QHBoxLayout()
-        head.addWidget(StrongBodyLabel("Last 20 runs of"))
-        self.pick = ComboBox()
-        self.pick.setMinimumWidth(200)
-        self.pick.currentIndexChanged.connect(lambda _: self._fill_recent())
-        head.addWidget(self.pick)
-        head.addStretch(1)
-        self.v.addLayout(head)
-        self.recent = TableWidget()
-        rcols = ["Time", "Device", "Model", "Waited", "Took", "Ended"]
-        self.recent.setColumnCount(len(rcols))
-        self.recent.setHorizontalHeaderLabels(rcols)
-        self.recent.verticalHeader().hide()
-        self.recent.setEditTriggers(TableWidget.EditTrigger.NoEditTriggers)
-        self.recent.horizontalHeader().setSectionResizeMode(QHeaderView.ResizeMode.ResizeToContents)
-        self.recent.horizontalHeader().setStretchLastSection(True)
-        self.recent.setMinimumHeight(300)
-        self.v.addWidget(self.recent)
-        self._apps: list[str] = []
+        self.period = "7"
+        self.filters: dict[str, str] = {c: "" for c in FILTER_COLUMNS}
+        self.limit = 20
+        self._sig = None
+        self._choices: dict[str, list[str]] = {c: [] for c in FILTER_COLUMNS}
+
+        # filters
+        self.periods = SegmentedWidget()
+        for key, words in PERIODS:
+            self.periods.addItem(key, words, lambda *_, k=key: self._set_period(k))
+        self.periods.setCurrentItem(self.period)
+        self.reset_b = PushButton(FluentIcon.SYNC, "Reset filters")
+        self.reset_b.clicked.connect(self.reset)
+        top = QHBoxLayout()
+        top.addWidget(self.periods)
+        top.addStretch(1)
+        top.addWidget(self.reset_b)
+        grid = QGridLayout()
+        grid.setHorizontalSpacing(12)
+        grid.setVerticalSpacing(2)
+        self.pick: dict[str, ComboBox] = {}
+        for j, (col, words) in enumerate([("app", "App"), ("device", "Device"), ("model", "Model"),
+                                          ("ending", "Ended")]):
+            grid.addWidget(CaptionLabel(words), 0, j)
+            box = ComboBox()
+            box.addItem("All")
+            box.currentIndexChanged.connect(lambda i, c=col: self._picked(c, i))
+            grid.addWidget(box, 1, j)
+            grid.setColumnStretch(j, 1)
+            self.pick[col] = box
+        self.span = CaptionLabel("")
+        self.v.addWidget(card(top, grid, self.span)[0])
+
+        # headline numbers
+        kpis = QGridLayout()
+        kpis.setSpacing(10)
+        self.kpi: dict[str, SubtitleLabel] = {}
+        for i, (key, words) in enumerate([("questions", "Questions"), ("tokens", "Tokens"),
+                                          ("plan_points", "Plan points"), ("api_price_usd", "API price"),
+                                          ("ok", "Ended well"), ("times", "Average wait · run")]):
+            value = SubtitleLabel("—")
+            c, _ = card(CaptionLabel(words), value)
+            kpis.addWidget(c, i // 3, i % 3)
+            self.kpi[key] = value
+        self.v.addLayout(kpis)
+
+        # plan use
+        self.five, self.five_bar = CaptionLabel(""), ProgressBar()
+        self.week, self.week_bar = CaptionLabel(""), ProgressBar()
+        meters = QHBoxLayout()
+        meters.setSpacing(24)
+        for label, bar in ((self.five, self.five_bar), (self.week, self.week_bar)):
+            col = QVBoxLayout()
+            col.addWidget(label)
+            col.addWidget(bar)
+            meters.addLayout(col, 1)
+        self.v.addWidget(card(self._head("Plan use", "the whole Claude plan, as Claude Code last reported it; "
+                                                     "the filters don't change it"), meters)[0])
+
+        # over time
+        self.measure = ComboBox()
+        for _, words in MEASURES:
+            self.measure.addItem(words)
+        self.measure.currentIndexChanged.connect(lambda _: self._redraw())
+        self.step_words = CaptionLabel("")
+        self.chart = StackedBars()
+        self.v.addWidget(card(self._head("Over time", None, self.step_words, self.measure), self.chart)[0])
+
+        # shares
+        self.share = ShareList()
+        self.share_note = CaptionLabel("")
+        self.ends = ShareList()
+        self.fail_note = CaptionLabel("")
+        self.fail_note.setWordWrap(True)
+        two = QHBoxLayout()
+        two.setSpacing(10)
+        two.addWidget(card(StrongBodyLabel("Share per app"), self.share, self.share_note)[0], 1)
+        two.addWidget(card(StrongBodyLabel("How runs ended"), self.ends, self.fail_note)[0], 1)
+        self.v.addLayout(two)
+
+        # breakdown
+        self.group = ComboBox()
+        for _, words in GROUPS:
+            self.group.addItem(words)
+        self.group.currentIndexChanged.connect(lambda _: self._redraw())
+        self.table = table(["App", "Questions", "Tokens", "Plan points", "API price", "Average wait", "Failed"], (0,))
+        self.table.cellClicked.connect(self._row_clicked)
+        self._rows: list[str] = []
+        self.v.addWidget(card(self._head("Breakdown", "click a row to filter by it", None, self.group),
+                              self.table)[0])
+
+        # runs
+        self.runs_title = StrongBodyLabel("Runs")
+        self.recent = table(["Time", "App", "Device", "Model", "Waited", "Took", "Tokens", "Points", "Ended"],
+                            (1, 2, 3))
+        self.more_b = PushButton("Show more")
+        self.more_b.clicked.connect(self._more)
+        more = QHBoxLayout()
+        more.addStretch(1)
+        more.addWidget(self.more_b)
+        more.addStretch(1)
+        self.v.addWidget(card(self.runs_title, self.recent, more)[0])
+
+        note = CaptionLabel(POINTS_NOTE + " Questions and answers are never stored, so they never show here.")
+        note.setWordWrap(True)
+        self.v.addWidget(note)
+
+    @staticmethod
+    def _head(title: str, note: str | None, extra: QWidget | None = None, right: QWidget | None = None):
+        h = QHBoxLayout()
+        h.setSpacing(8)
+        h.addWidget(StrongBodyLabel(title))
+        if note:
+            h.addWidget(CaptionLabel("· " + note))
+        if extra is not None:
+            h.addWidget(extra)
+        h.addStretch(1)
+        if right is not None:
+            right.setMinimumWidth(150)
+            h.addWidget(right)
+        return h
+
+    # --- the owner's choices --------------------------------------------------------------------------------------------
+
+    def _set_period(self, key: str) -> None:
+        self.period = key
+        self.limit = 20
+        self._redraw()
+
+    def _picked(self, col: str, i: int) -> None:
+        values = self._choices[col]
+        self.filters[col] = values[i - 1] if 1 <= i <= len(values) else ""
+        self.limit = 20
+        self._redraw()
+
+    def set_filter(self, col: str, value: str) -> None:
+        values = self._choices[col]
+        box = self.pick[col]
+        box.blockSignals(True)
+        box.setCurrentIndex(values.index(value) + 1 if value in values else 0)
+        box.blockSignals(False)
+        self.filters[col] = value if value in values else ""
+        self.limit = 20
+        self._redraw()
+
+    def _row_clicked(self, r: int, _c: int) -> None:
+        if 0 <= r < len(self._rows):
+            self.set_filter(GROUPS[self.group.currentIndex()][0], self._rows[r])
+
+    def _more(self) -> None:
+        self.limit += 50
+        self._redraw()
+
+    def reset(self) -> None:
+        self.period = "7"
+        self.periods.setCurrentItem("7")
+        for col, box in self.pick.items():
+            box.blockSignals(True)
+            box.setCurrentIndex(0)
+            box.blockSignals(False)
+            self.filters[col] = ""
+        self.limit = 20
+        self._redraw()
+
+    # --- drawing ------------------------------------------------------------------------------------------------------
+
+    def _redraw(self) -> None:
+        self._sig = None
+        self.refresh()
 
     def refresh(self) -> None:
-        u, p = self.svc.usage, self.svc.pairings
-        pct, words = plan_text(self.svc.plan_use())
-        self.plan.setText(f"Plan use Claude Code last reported: {words}. These are for the whole Claude plan, not "
-                          "per app; each app's share is shown as its share of today's tokens. "
-                          f"{POINTS_NOTE}")
-        today = u.totals(start_of_today())
-        week = u.totals(time.time() - 7 * 86400)
-        apps = sorted(set(week) | set(today))
-        all_today = sum(x["tokens"] for x in today.values()) or 0
-        self.table.setRowCount(len(apps))
-        zero = {"questions": 0, "tokens": 0, "api_price_usd": 0, "plan_points": 0}
-        for i, a in enumerate(apps):
-            t = today.get(a, zero)
-            w = week.get(a, zero)
-            share = f"{round(100 * t['tokens'] / all_today)}%" if all_today else "—"
-            for j, val in enumerate([p.app_name(a), t["questions"], f"{t['tokens']:,}", share,
-                                     f"{t['plan_points']:.1f}", f"${t['api_price_usd']:.2f}", w["questions"],
-                                     f"{w['tokens']:,}", f"{w['plan_points']:.1f}", f"${w['api_price_usd']:.2f}"]):
-                self.table.setItem(i, j, QTableWidgetItem(str(val)))
-        if apps != self._apps:
-            current = self._apps[self.pick.currentIndex()] if 0 <= self.pick.currentIndex() < len(self._apps) else None
-            self._apps = apps
-            self.pick.blockSignals(True)
-            self.pick.clear()
-            self.pick.addItems([p.app_name(a) for a in apps])
-            if current in apps:
-                self.pick.setCurrentIndex(apps.index(current))
-            self.pick.blockSignals(False)
-        self._fill_recent()
+        u = self.svc.usage
+        plan = self.svc.plan_use() or {}
+        sig = (u.version(), plan.get("five_hour"), plan.get("seven_day"), isDarkTheme(), self.period,
+               tuple(self.filters.values()), self.measure.currentIndex(), self.group.currentIndex(), self.limit,
+               time.strftime("%Y-%m-%d %H"))
+        if sig == self._sig:
+            return  # the tray asks up to four times a second; redraw only when something changed
+        self._sig = sig
+        p = self.svc.pairings
+        self._fill_choices(u.choices())
+        apps_all = self._choices["app"]  # an app's colour follows its place here, so filters don't repaint it
+        since, f = period_start(self.period), self.filters
 
-    def _fill_recent(self) -> None:
-        i = self.pick.currentIndex()
-        runs = self.svc.usage.recent(self._apps[i]) if 0 <= i < len(self._apps) else []
+        s = u.summary(since, f)
+        n = s["questions"]
+        self.span.setText(f"Showing {PERIOD_WORDS[self.period]}: {n} question{'s' * (n != 1)}.")
+        self.kpi["questions"].setText(str(n))
+        self.kpi["tokens"].setText(short_number(s["tokens"]))
+        self.kpi["plan_points"].setText(f"{s['plan_points']:.1f}")
+        self.kpi["api_price_usd"].setText(f"${s['api_price_usd']:.2f}")
+        self.kpi["ok"].setText(f"{round(100 * s['done'] / n)}%" if n else "—")
+        self.kpi["times"].setText(f"{seconds(s['avg_queued_ms'])} · {seconds(s['avg_run_ms'])}" if n else "—")
+
+        five, week = plan.get("five_hour"), plan.get("seven_day")
+        for label, bar, words, val in ((self.five, self.five_bar, "5-hour window", five),
+                                       (self.week, self.week_bar, "7-day window", week)):
+            known = isinstance(val, (int, float))
+            label.setText(f"{words} · {round(val * 100)}%" if known else f"{words} · not reported yet")
+            bar.setValue(round(val * 100) if known else 0)
+
+        m = MEASURES[self.measure.currentIndex()][0]
+        step, keys, labels = buckets(self.period, s["first_at"])
+        self.step_words.setText("· " + {"hour": "per hour", "day": "per day", "month": "per month"}[step])
+        sums = u.series(since, f, step)
+        shown_apps = [a for a in apps_all if any((k, a) in sums for k in keys)]
+        self.chart.set_data(labels, [(p.app_name(a), series_colour(apps_all.index(a)),
+                                      [sums.get((k, a), {}).get(m, 0) for k in keys]) for a in shown_apps],
+                            lambda v: measure_text(v, m))
+
+        per_app = {r["key"]: r for r in u.breakdown(since, f, "app")}
+        total = sum(r[m] for r in per_app.values()) or 0
+        self.share.set_rows([(p.app_name(a), f"{measure_text(r[m], m)} · {round(100 * r[m] / total) if total else 0}%",
+                              r[m] / total if total else 0, series_colour(apps_all.index(a)))
+                             for a, r in sorted(per_app.items(), key=lambda x: -x[1][m])])
+        self.share_note.setText(f"Measured in {MEASURES[self.measure.currentIndex()][1].lower()}."
+                                if per_app else "No runs match these filters.")
+
+        e = u.endings(since, f)
+        order = [k for k in ENDING_WORDS if k in e["endings"]]
+        self.ends.set_rows([(ENDING_WORDS[k], f"{e['endings'][k]} · {round(100 * e['endings'][k] / n)}%",
+                             e["endings"][k] / n, ending_colour(k)) for k in order] if n else [])
+        self.fail_note.setText("Failures: " + " · ".join(f"{k} {c}" for k, c in e["failures"].items())
+                               if e["failures"] else ("No failures." if n else "No runs match these filters."))
+
+        by = GROUPS[self.group.currentIndex()][0]
+        rows = u.breakdown(since, f, by)
+        self._rows = [r["key"] for r in rows]
+        self.table.setHorizontalHeaderItem(0, QTableWidgetItem({"app": "App", "device": "Device", "model": "Model"}[by]))
+        self.table.setRowCount(len(rows))
+        for i, r in enumerate(rows):
+            name = p.app_name(r["key"]) if by == "app" else r["key"]
+            for j, val in enumerate([name, r["questions"], short_number(r["tokens"]), f"{r['plan_points']:.1f}",
+                                     f"${r['api_price_usd']:.2f}", seconds(r["avg_queued_ms"]), r["failed"]]):
+                self.table.setItem(i, j, QTableWidgetItem(str(val)))
+        fit_rows(self.table)
+
+        runs = u.runs(since, f, self.limit)
+        self.runs_title.setText(f"Runs · showing {len(runs)} of {n}")
         self.recent.setRowCount(len(runs))
-        for r, x in enumerate(runs):
-            ended = x["ending"] if x["ending"] in ENDINGS else f"failed ({x['error_kind'] or 'other'})"
-            for j, val in enumerate([when(x["asked_at"]), x["device"], x["model"], seconds(x["queued_ms"]),
-                                     seconds(x["run_ms"]), ended]):
-                self.recent.setItem(r, j, QTableWidgetItem(str(val)))
+        for i, x in enumerate(runs):
+            pts = "—" if x["plan_points"] is None else f"{x['plan_points']:.1f}"
+            for j, val in enumerate([when(x["asked_at"]), p.app_name(x["app"]), x["device"], x["model"],
+                                     seconds(x["queued_ms"]), seconds(x["run_ms"]), short_number(x["tokens"]), pts,
+                                     ended_text(x["ending"], x["error_kind"])]):
+                self.recent.setItem(i, j, QTableWidgetItem(str(val)))
+        fit_rows(self.recent)
+        self.more_b.setVisible(len(runs) < n)
+
+    def _fill_choices(self, choices: dict[str, list[str]]) -> None:
+        """Puts new apps, devices, models or endings into the filter lists, keeping what is picked."""
+        p = self.svc.pairings
+        for col, values in choices.items():
+            if values == self._choices[col]:
+                continue
+            self._choices[col] = values
+            box = self.pick[col]
+            box.blockSignals(True)
+            box.clear()
+            box.addItem("All")
+            for v in values:
+                box.addItem(p.app_name(v) if col == "app" else ENDING_WORDS.get(v, v) if col == "ending" else v)
+            keep = self.filters[col]
+            box.setCurrentIndex(values.index(keep) + 1 if keep in values else 0)
+            if keep not in values:
+                self.filters[col] = ""
+            box.blockSignals(False)
 
 
 POINTS_NOTE = ("Plan points are estimates: 100 points is one full 5-hour window of the Claude plan, and Claude only "
