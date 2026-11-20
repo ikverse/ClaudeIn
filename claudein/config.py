@@ -7,7 +7,7 @@ import os
 from dataclasses import asdict, dataclass, fields
 from pathlib import Path
 
-VERSION = "1.1.1"
+VERSION = "1.2.0"
 
 #: What /hello says as "app". Today's phones only accept this name (plan 4.2).
 HELLO_APP = "Signal Lab analyst host"
